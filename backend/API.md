@@ -1,0 +1,2259 @@
+# Backend API Documentation
+
+## Base URL
+`http://localhost:8000`
+
+---
+
+## Roles
+
+`User.role` is a free string (profile code or French label). Two server-side checks apply:
+
+- **Read-only roles** — `AUDITOR`, `Auditeur Interne`: every write endpoint answers `403 Forbidden` (document update / assignee / delete / ingest, procedure ingest, requirement extract and job processing, mapping human-status and analyze).
+- **Administrator roles** — `COMPLIANCE_ADMIN`, `Admin Base de Connaissances`: required for `PUT /api/users/{user_id}/role`.
+
+List endpoints (`/api/documents`, `/api/requirements`, `/api/procedures`, `/api/users`, `/api/mappings/all`) return a stable order (creation date, then id), so `limit`/`offset` pages do not overlap.
+
+## Endpoints
+
+### 1. Health Check
+
+#### `GET /health`
+Check database connectivity and server health.
+
+**Response (200 OK)**
+```json
+{
+  "status": "ok",
+  "database": "connected"
+}
+```
+
+**Response (500 on error)**
+```json
+{
+  "status": "error",
+  "database": "disconnected",
+  "error": "<error message>"
+}
+```
+
+---
+
+## 2. Documents
+
+### List Documents with Filters
+
+#### `GET /api/documents`
+Get a paginated list of documents with optional filtering by category, domain, language, document type, or title search.
+
+**Query Parameters (all optional)**
+- `category` (string): Filter by category (EXTERNAL, INTERNAL, CONTROL)
+- `domain` (string): Filter by domain (e.g., AML/CFT, KYC, DATA_PROTECTION, MIFID)
+- `language` (string): Filter by language (EN, FR)
+- `document_type` (string): Filter by document type (REGULATORY_STANDARD, GUIDELINE, PROCEDURE, SUPERVISORY_POSITION, REGULATION, GUIDANCE, POLICY, CONTROL_STANDARD)
+- `title` (string): Search by title (case-insensitive partial match)
+- `limit` (integer): Max results per page (default: 50, max: 200)
+- `offset` (integer): Number of results to skip for pagination (default: 0)
+
+**Authentication** Required (Bearer token)
+
+**Request Examples**
+```
+GET /api/documents?domain=AML/CFT&language=FR
+GET /api/documents?category=EXTERNAL&limit=100
+GET /api/documents?title=KYC&offset=50
+GET /api/documents?domain=MIFID&document_type=GUIDELINE&limit=20
+```
+
+**Response (200 OK)**
+```json
+{
+  "total": 32,
+  "items": [
+    {
+      "document_id": "EXT-EU-AML-001",
+      "title": "EU AML/CFT Customer Due Diligence Demo Standard",
+      "category": "EXTERNAL",
+      "document_type": "REGULATORY_STANDARD",
+      "origin_code": "EU",
+      "origin_name": "European Union",
+      "domain": "AML/CFT",
+      "language": "EN",
+      "summary": "This standard provides guidance on customer due diligence procedures for AML/CFT compliance.",
+      "current_version": "2.0",
+      "current_file_path": "documents/external/EXT-EU-AML-001__v2_0__EN.md",
+      "data_classification": "SYNTHETIC_DEMO",
+      "created_at": "2024-03-25T09:00:00",
+      "updated_at": "2024-03-25T09:00:00",
+      "published_at": "2024-03-25T10:00:00",
+      "assignee": null
+    }
+  ],
+  "limit": 50,
+  "offset": 0
+}
+```
+
+**Response (401 Unauthorized)**
+```json
+{
+  "detail": "Not authenticated"
+}
+```
+
+---
+
+### Get Document by ID
+
+#### `GET /api/documents/{document_id}`
+Retrieve a single document by its ID.
+
+**Path Parameters**
+- `document_id` (required): The ID of the document (e.g., EXT-EU-AML-001)
+
+**Authentication** Required (Bearer token)
+
+**Request Example**
+```
+GET /api/documents/EXT-EU-AML-001
+```
+
+**Response (200 OK)**
+```json
+{
+  "document_id": "EXT-EU-AML-001",
+  "title": "EU AML/CFT Customer Due Diligence Demo Standard",
+  "category": "EXTERNAL",
+  "document_type": "REGULATORY_STANDARD",
+  "origin_code": "EU",
+  "origin_name": "European Union",
+  "domain": "AML/CFT",
+  "language": "EN",
+  "summary": "This standard provides guidance on customer due diligence procedures for AML/CFT compliance.",
+  "current_version": "2.0",
+  "current_file_path": "documents/external/EXT-EU-AML-001__v2_0__EN.md",
+  "data_classification": "SYNTHETIC_DEMO",
+  "created_at": "2024-03-25T09:00:00",
+  "updated_at": "2024-03-25T09:00:00",
+  "published_at": "2024-03-25T10:00:00"
+}
+```
+
+**Response (404 Not Found)**
+```json
+{
+  "detail": "Document not found"
+}
+```
+
+---
+
+### Update Document Content & Create New Version
+
+#### `POST /api/documents/{document_id}/update`
+Update document content, create a new version, and auto-increment the version number. All chunks must be provided.
+
+**Path Parameters**
+- `document_id` (required): The ID of the document to update (e.g., EXT-EU-AML-001)
+
+**Request Body**
+- `change_reason` (required): Reason/description of the changes
+- `created_by` (ignored): the version is attributed to the authenticated user  
+- `file_path` (optional): Path to the updated document file (for audit trail reference)
+- `chunks` (required): Array of document chunks with updated content
+
+**Chunk Structure (each chunk requires):**
+```json
+{
+  "chunk_no": 1,
+  "section_title": "Document Header",
+  "content": "# Document Content...",
+  "language": "EN",
+  "domain": "AML/CFT"
+}
+```
+
+**Authentication** Required (Bearer token)
+
+**Request Example**
+```json
+POST /api/documents/EXT-EU-AML-001/update
+{
+  "change_reason": "Updated KYC procedures for new regulatory requirements",
+  "created_by": "compliance.officer@bank.com",
+  "file_path": "documents/external/EXT-EU-AML-001__v3_0__EN.md",
+  "chunks": [
+    {
+      "chunk_no": 1,
+      "section_title": "Document Header",
+      "content": "# EU AML/CFT Standard v3.0...",
+      "language": "EN",
+      "domain": "AML/CFT"
+    },
+    {
+      "chunk_no": 2,
+      "section_title": "Purpose and Scope",
+      "content": "## Purpose...",
+      "language": "EN",
+      "domain": "AML/CFT"
+    }
+  ]
+}
+```
+
+**Response (201 Created)**
+```json
+{
+  "version_id": "VER-EXT-EU-AML-001-03",
+  "document_id": "EXT-EU-AML-001",
+  "version_no": "3.0",
+  "status": "ACTIVE",
+  "created_by": "compliance.officer@bank.com",
+  "change_reason": "Updated KYC procedures for new regulatory requirements",
+  "total_chunks": 2,
+  "chunks": [
+    {
+      "chunk_id": "CHK-EXT-EU-AML-001-03-001",
+      "document_id": "EXT-EU-AML-001",
+      "version_id": "VER-EXT-EU-AML-001-03",
+      "chunk_no": 1,
+      "section_title": "Document Header",
+      "content": "# EU AML/CFT Standard v3.0...",
+      "language": "EN",
+      "domain": "AML/CFT"
+    },
+    {
+      "chunk_id": "CHK-EXT-EU-AML-001-03-002",
+      "document_id": "EXT-EU-AML-001",
+      "version_id": "VER-EXT-EU-AML-001-03",
+      "chunk_no": 2,
+      "section_title": "Purpose and Scope",
+      "content": "## Purpose...",
+      "language": "EN",
+      "domain": "AML/CFT"
+    }
+  ]
+}
+```
+
+**Response (400 Bad Request)**
+```json
+{
+  "detail": "Chunks must be numbered sequentially starting from 1"
+}
+```
+
+**Response (404 Not Found)**
+```json
+{
+  "detail": "Document not found"
+}
+```
+
+**Notes:**
+- Version number is auto-incremented (e.g., 1.0 → 2.0 → 3.0)
+- New version_id is generated automatically (VER-{doc_id}-{version_no_padded})
+- New chunk_ids are generated (CHK-{doc_id}-{version_no}-{chunk_no_padded})
+- All previous ACTIVE versions are marked as SUPERSEDED
+- Document.current_version is updated to the new version
+- Chunks must be numbered sequentially starting from 1
+- All chunks from the previous version should be re-submitted (it's a full replacement)
+
+---
+
+### List Document Versions
+
+#### `GET /api/documents/{document_id}/versions`
+All versions of a document (metadata only), oldest first. Content of one version:
+`GET /api/documents/content/{version_id}`.
+
+**Authentication** Required (Bearer token)
+
+**Response (200 OK)**
+```json
+[
+  {
+    "version_id": "VER-INT-EU-002-01",
+    "document_id": "INT-EU-002",
+    "version_no": "1.0",
+    "version_timestamp": "2026-09-21T04:03:36",
+    "status": "SUPERSEDED",
+    "file_path": "procedures/internal/INT-EU-002__v1_0__FR.md",
+    "sha256": null,
+    "created_by": "USR-8986…",
+    "change_reason": "Initial procedure ingestion"
+  },
+  {
+    "version_id": "VER-INT-EU-002-02",
+    "document_id": "INT-EU-002",
+    "version_no": "2.0",
+    "version_timestamp": "2026-09-21T06:41:10",
+    "status": "ACTIVE",
+    "file_path": null,
+    "sha256": "…",
+    "created_by": "USR-8986…",
+    "change_reason": "Accepted MAP-0005 (requirement REQ-0003)"
+  }
+]
+```
+
+**Response (404 Not Found)** — `{"detail": "Document not found"}`
+
+---
+
+### Get Document Content by Version ID
+
+#### `GET /api/documents/content/{version_id}`
+Retrieve all document content (chunks) for a specific document version, including version metadata and all text chunks.
+
+**Path Parameters**
+- `version_id` (required): The ID of the document version (e.g., VER-EXT-EU-AML-001-01)
+
+**Authentication** Required (Bearer token)
+
+**Request Example**
+```
+GET /api/documents/content/VER-EXT-EU-AML-001-01
+```
+
+**Response (200 OK)**
+```json
+{
+  "version": {
+    "version_id": "VER-EXT-EU-AML-001-01",
+    "document_id": "EXT-EU-AML-001",
+    "version_no": "1.0",
+    "version_timestamp": "2024-03-26T19:07:00",
+    "status": "SUPERSEDED",
+    "file_path": "documents/external/EXT-EU-AML-001__v1_0__EN.md",
+    "sha256": "cfd5c2f9711afbc02ce904cea36f2825db6d374cf1bec234ca4889488ffd1162",
+    "created_by": "demo.system",
+    "change_reason": "Version 1.0 controlled update"
+  },
+  "chunks": [
+    {
+      "chunk_id": "CHK-EXT-EU-AML-001-01-001",
+      "document_id": "EXT-EU-AML-001",
+      "version_id": "VER-EXT-EU-AML-001-01",
+      "chunk_no": 1,
+      "section_title": "Document Header",
+      "content": "# EU AML/CFT Customer Due Diligence Demo Standard\n\n**Document ID:** EXT-EU-AML-001\n...",
+      "language": "EN",
+      "domain": "AML/CFT"
+    },
+    {
+      "chunk_id": "CHK-EXT-EU-AML-001-01-002",
+      "document_id": "EXT-EU-AML-001",
+      "version_id": "VER-EXT-EU-AML-001-01",
+      "chunk_no": 2,
+      "section_title": "1. Purpose and Scope",
+      "content": "## 1. Purpose and Scope\n\nThis document defines a demonstration framework...",
+      "language": "EN",
+      "domain": "AML/CFT"
+    }
+  ],
+  "total_chunks": 9
+}
+```
+
+**Response (404 Not Found)**
+```json
+{
+  "detail": "Document version not found"
+}
+```
+
+**Notes:**
+- Chunks are sorted by `chunk_no` in ascending order
+- Each chunk contains the full text content for that section
+- `total_chunks` indicates the total number of chunks in this version
+
+---
+
+### Update Document Assignee
+
+#### `PUT /api/documents/{document_id}/assignee`
+Update the assignee (responsible person) of a document.
+
+**Path Parameters**
+- `document_id` (required): The ID of the document (e.g., EXT-EU-AML-001)
+
+**Request Body**
+- `assignee` (optional): User ID or email to assign (can be null to clear assignment)
+
+**Authentication** Required (Bearer token)
+
+**Request Examples**
+```json
+PUT /api/documents/EXT-EU-AML-001/assignee
+{"assignee": "compliance.officer@bank.com"}
+
+PUT /api/documents/EXT-EU-AML-001/assignee
+{"assignee": "junior.analyst@bank.com"}
+
+PUT /api/documents/EXT-EU-AML-001/assignee
+{"assignee": null}
+```
+
+**Response (200 OK)**
+```json
+{
+  "document_id": "EXT-EU-AML-001",
+  "title": "EU AML/CFT Customer Due Diligence Demo Standard",
+  "category": "EXTERNAL",
+  "document_type": "REGULATORY_STANDARD",
+  "origin_code": "EU",
+  "origin_name": "European Union",
+  "domain": "AML/CFT",
+  "language": "EN",
+  "summary": "This standard provides guidance on customer due diligence procedures for AML/CFT compliance.",
+  "current_version": "2.0",
+  "current_file_path": "documents/external/EXT-EU-AML-001__v2_0__EN.md",
+  "data_classification": "SYNTHETIC_DEMO",
+  "created_at": "2024-03-25T09:00:00",
+  "updated_at": "2024-03-25T09:00:00",
+  "published_at": "2024-03-25T10:00:00",
+  "assignee": "compliance.officer@bank.com"
+}
+```
+
+**Response (404 Not Found)**
+```json
+{
+  "detail": "Document not found"
+}
+```
+
+Every actual change (new value ≠ current value) is logged in `audit_history`
+(`event_type = "ASSIGNEE_CHANGED"`, `actor` = current user, `details` = `{"from": …, "to": …}`),
+readable with the route below.
+
+---
+
+### Document Assignee History
+
+#### `GET /api/documents/{document_id}/history`
+Assignee changes of a document, newest first. Empty list if none (or unknown document).
+
+**Authentication** Required (Bearer token)
+
+**Response (200 OK)**
+```json
+[
+  {
+    "audit_id": "AUD-3f2c…",
+    "document_id": "EXT-EU-001",
+    "from_assignee": "USR-0001",
+    "to_assignee": "USR-0002",
+    "actor": "USR-0003",
+    "event_timestamp": "2026-09-23T10:15:00"
+  }
+]
+```
+
+---
+
+#### `DELETE /api/documents/{document_id}`
+Delete a document and all linked data (cascading deletion).
+
+This endpoint permanently deletes:
+1. All RequirementProcedureMap rows linking to requirements from this document
+2. All RegulatoryRequirement rows sourced from this document
+3. All DocumentChunk rows in all versions of this document
+4. All DocumentVersion rows for this document
+5. The Document itself
+
+**Path Parameters:**
+- `document_id`: The ID of the document to delete (e.g., EXT-EU-AML-001)
+
+**Authentication** Required (Bearer token)
+
+**Example URL:**
+```
+DELETE /api/documents/EXT-EU-AML-001
+```
+
+**Response (200 OK)**
+```json
+{
+  "document_id": "EXT-EU-AML-001",
+  "message": "Document and all linked data deleted successfully",
+  "deleted_counts": {
+    "document_versions": 3,
+    "document_chunks": 15,
+    "requirements": 5,
+    "requirement_mappings": 12
+  }
+}
+```
+
+**Response (404 Not Found)**
+```json
+{
+  "detail": "Document not found"
+}
+```
+
+**⚠️ Warning:** This operation is irreversible and permanently deletes:
+- The document and all its versions
+- All requirements extracted from this document
+- All mappings linking those requirements to procedures
+- Use with extreme caution
+
+---
+
+## 3. Pipeline - Document Ingestion & Requirements Analysis
+
+### Ingest Regulation Document
+
+#### `POST /api/documents/regulation-ingest`
+Ingest a regulation document: chunk by token count and store in database.
+
+This endpoint accepts raw regulation text and:
+1. Extracts metadata heuristically (title, domain, language, summary)
+2. Splits the text into chunks using token-based chunking (max 800 tokens per chunk)
+3. Respects paragraph boundaries - text in one chunk stays within the same paragraph
+4. Stores as Document → DocumentVersion → DocumentChunk rows
+
+**Authentication** Required (Bearer token)
+
+**Request Body**
+- `text` (required): Raw regulation document text (can be very long)
+- `title` (required): Document title
+- `domain` (required): Compliance domain (e.g., AML/CFT, KYC, DORA, MIFID, SANCTIONS, OUTSOURCING, DATA_PROTECTION, COMPLIANCE, AI_GOVERNANCE)
+- `language` (required): Document language (EN or FR)
+- `summary` (optional): Brief summary of the document
+- `created_by` (ignored): the document is attributed to the authenticated user
+- `published_at` (optional): When the document was published (ISO 8601 datetime format)
+- `origin_code` / `origin_name` (optional): issuing authority, e.g. `ACPR` / `French Prudential Supervision and Resolution Authority`. Default: `EU` / `European Union`
+
+**Request Example**
+```json
+POST /api/documents/regulation-ingest
+{
+  "text": "# EU AML/CFT Regulation\n\n## Section 1: Customer Due Diligence\n...",
+  "title": "EU AML/CFT Regulation",
+  "domain": "AML/CFT",
+  "language": "EN",
+  "summary": "Guidelines on customer due diligence and AML/CFT compliance",
+  "created_by": "compliance.officer@bank.com",
+  "published_at": "2026-09-16T10:00:00"
+}
+```
+
+**Response (201 Created)**
+```json
+{
+  "document_id": "EXT-EU-AML-002",
+  "title": "EU AML/CFT Customer Due Diligence Demo Standard",
+  "category": "EXTERNAL",
+  "document_type": "REGULATORY_STANDARD",
+  "origin_code": "EU",
+  "origin_name": "European Union",
+  "domain": "AML/CFT",
+  "language": "EN",
+  "data_classification": "EUR-Lex/CELLAR",
+  "current_version": "1.0",
+  "chunks_count": 8
+}
+```
+
+**Response (400 Bad Request)**
+```json
+{
+  "detail": "LLM API error: ..."
+}
+```
+
+**Response (500 on error)**
+```json
+{
+  "detail": "Document ingestion failed: ..."
+}
+```
+
+**Notes:**
+- No LLM required - uses token counting (tiktoken or word-based estimation)
+- Chunks have maximum 800 tokens each
+- Paragraph boundaries are respected - paragraphs are never split across chunks
+- Headings (Markdown # format or short uppercase lines) are detected and become chunk section titles
+- **Metadata must be provided by the client** (title, domain, language, summary) - no automatic extraction
+- Document IDs are generated sequentially per origin_code
+- All documents start at version 1.0
+- Chunks are numbered sequentially starting from 1
+
+---
+
+### Ingest Internal Procedure Document
+
+#### `POST /api/procedures/ingest`
+Ingest an internal procedure document: chunk by token count and store in database.
+
+This endpoint accepts raw procedure text and:
+1. Chunks the text using token-based chunking (max 800 tokens per chunk)
+2. Respects paragraph boundaries - text in one chunk stays within the same paragraph
+3. Stores as Document → DocumentVersion → DocumentChunk rows (with DOCUMENT_TYPE="PROCEDURE" to identify it as an internal procedure)
+
+**Authentication** Required (Bearer token)
+
+**Request Body**
+- `text` (required): Raw procedure document text (can be very long)
+- `title` (required): Procedure title
+- `domain` (required): Compliance domain (e.g., AML/CFT, KYC, DORA, MIFID, SANCTIONS, OUTSOURCING, DATA_PROTECTION, COMPLIANCE, AI_GOVERNANCE)
+- `language` (required): Document language (EN or FR)
+- `summary` (optional): Brief summary of the procedure
+- `created_by` (ignored): the procedure is attributed to the authenticated user
+- `published_at` (optional): When the procedure was published (ISO 8601 datetime format)
+
+**Request Example**
+```json
+POST /api/procedures/ingest
+{
+  "text": "# KYC Onboarding Procedure\n\n## Section 1: Customer Identification\n...",
+  "title": "KYC Onboarding Procedure",
+  "domain": "KYC",
+  "language": "EN",
+  "summary": "Internal procedure for customer onboarding and KYC verification",
+  "created_by": "compliance.officer@bank.com",
+  "published_at": "2026-09-16T10:00:00"
+}
+```
+
+**Response (201 Created)**
+```json
+{
+  "document_id": "INT-EU-KYC-001",
+  "title": "KYC Onboarding Procedure",
+  "category": "INTERNAL",
+  "document_type": "PROCEDURE",
+  "origin_code": "EU",
+  "origin_name": "European Union",
+  "domain": "KYC",
+  "language": "EN",
+  "data_classification": "",
+  "current_version": "1.0",
+  "chunks_count": 5
+}
+```
+
+**Response (400 Bad Request)**
+```json
+{
+  "detail": "Invalid request: ..."
+}
+```
+
+**Response (500 on error)**
+```json
+{
+  "detail": "Procedure ingestion failed: ..."
+}
+```
+
+**Notes:**
+- No LLM required - uses token counting (tiktoken or word-based estimation)
+- Chunks have maximum 800 tokens each
+- Paragraph boundaries are respected - paragraphs are never split across chunks
+- Headings (Markdown # format or short uppercase lines) are detected and become chunk section titles
+- **Metadata must be provided by the client** (title, domain, language, summary)
+- Document IDs are generated sequentially per origin_code (INT-EU-\<seq\>)
+- All procedures start at version 1.0
+- Category: INTERNAL, Origin: Demo Bank (`origin_code` = `BANK`), as in the reference corpus
+- Stored as Document with DOCUMENT_TYPE="PROCEDURE" to identify internal procedures
+
+---
+
+### Create Extraction Jobs for Document (Async Workflow)
+
+#### `POST /api/requirements/extract`
+Create extraction jobs for all chunks of a document (asynchronous job-based workflow).
+
+This endpoint takes a document_id and creates one extraction job per chunk. Jobs start in PENDING status. Use the job processing endpoint to process each job and extract requirements from that chunk.
+
+**Authentication** Required (Bearer token)
+
+**Request Body**
+- `document_id` (required): ID of document to extract requirements from
+
+**Request Example**
+```json
+POST /api/requirements/extract
+{
+  "document_id": "EXT-EU-AML-002"
+}
+```
+
+**Response (201 Created)**
+```json
+{
+  "document_id": "EXT-EU-AML-002",
+  "document_version_id": "VER-EXT-EU-AML-002-01",
+  "total_jobs_created": 3,
+  "jobs": [
+    {
+      "job_id": "550e8400-e29b-41d4-a716-446655440000",
+      "document_id": "EXT-EU-AML-002",
+      "document_version_id": "VER-EXT-EU-AML-002-01",
+      "chunk_no": 1,
+      "status": "PENDING",
+      "extracted_requirement_ids": null,
+      "error_message": null,
+      "created_at": "2026-09-25T10:00:00",
+      "updated_at": "2026-09-25T10:00:00"
+    },
+    {
+      "job_id": "550e8400-e29b-41d4-a716-446655440001",
+      "document_id": "EXT-EU-AML-002",
+      "document_version_id": "VER-EXT-EU-AML-002-01",
+      "chunk_no": 2,
+      "status": "PENDING",
+      "extracted_requirement_ids": null,
+      "error_message": null,
+      "created_at": "2026-09-25T10:00:00",
+      "updated_at": "2026-09-25T10:00:00"
+    },
+    {
+      "job_id": "550e8400-e29b-41d4-a716-446655440002",
+      "document_id": "EXT-EU-AML-002",
+      "document_version_id": "VER-EXT-EU-AML-002-01",
+      "chunk_no": 3,
+      "status": "PENDING",
+      "extracted_requirement_ids": null,
+      "error_message": null,
+      "created_at": "2026-09-25T10:00:00",
+      "updated_at": "2026-09-25T10:00:00"
+    }
+  ]
+}
+```
+
+**Response (400 Bad Request)**
+```json
+{
+  "detail": "Document EXT-EU-AML-002 not found"
+}
+```
+
+**Response (500 on error)**
+```json
+{
+  "detail": "Failed to create extraction jobs: ..."
+}
+```
+
+**Notes:**
+- Jobs are created but NOT processed immediately — caller must trigger processing
+- **Idempotent**: if jobs already exist for the document's active version, no new job is created. The response then has `total_jobs_created: 0` and `jobs` lists only the jobs still to process (PENDING, or FAILED with nothing extracted) — calling it again is how a client resumes an interrupted extraction
+- Each job extracts requirements from one document chunk
+- Use POST /api/jobs/{job_id}/process to process each job
+- Ingested document must have chunks (via /api/documents/regulation-ingest)
+
+---
+
+### Process a Single Extraction Job
+
+#### `POST /api/requirements/jobs/{job_id}/process`
+Process a single extraction job: extract requirements from a chunk and persist them to the database.
+
+This endpoint:
+1. Loads the specified job
+2. Extracts requirements from the chunk via LLM
+3. Persists requirements to RegulatoryRequirement table
+4. Updates job status to COMPLETED (with requirement_ids) or FAILED (with error)
+
+**Authentication** Required (Bearer token)
+
+**Path Parameters**
+- `job_id` (required, UUID): The ID of the extraction job to process
+
+**Request Example**
+```
+POST /api/requirements/jobs/550e8400-e29b-41d4-a716-446655440000/process
+```
+
+**Response (200 OK) — Success**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "COMPLETED",
+  "extracted_requirement_ids": ["REQ-0001", "REQ-0002", "REQ-0003"],
+  "error_message": null,
+  "chunks_processed": 1
+}
+```
+
+**Response (200 OK) — Failure**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440001",
+  "status": "FAILED",
+  "extracted_requirement_ids": [],
+  "error_message": "LLM call failed: API timeout",
+  "chunks_processed": 0
+}
+```
+
+**Response (404 Not Found)**
+```json
+{
+  "detail": "Extraction job not found"
+}
+```
+
+**Response (400 Bad Request)**
+```json
+{
+  "detail": "Job is in COMPLETED status; only PENDING jobs can be processed"
+}
+```
+
+**Response (500 on error)**
+```json
+{
+  "detail": "Failed to process extraction job: ..."
+}
+```
+
+**Notes:**
+- Requires OPENROUTER_API_KEY environment variable
+- **Job processing rules:**
+  - PENDING jobs can always be processed
+  - FAILED jobs can only be processed if `extracted_requirement_ids` is NULL (never successfully extracted)
+  - Jobs that have extracted requirements cannot be reprocessed (prevents duplicates)
+- Requirement IDs are generated sequentially globally
+- All extracted requirements are marked as ACTIVE status
+- On failure, job status is updated to FAILED with error_message set (allows retry)
+- On success, job status is updated to COMPLETED with extracted_requirement_ids set (prevents accidental reprocessing). The requirements and the job status are committed together
+
+---
+
+### Analyze Requirement Impact on Procedures
+
+#### `POST /api/mappings/analyze`
+Analyze impact of requirements on internal procedures and generate mappings.
+
+This endpoint takes a list of requirement IDs and uses an LLM to:
+1. For each requirement, find all procedures in the same domain
+2. Assess how the requirement impacts each procedure
+3. Generate suggested modifications if needed
+4. Store RequirementProcedureMap rows with PENDING_REVIEW status
+
+**Authentication** Required (Bearer token)
+
+**Request Body**
+- `requirement_ids` (required): List of requirement IDs to analyze
+
+**Request Example**
+```json
+POST /api/mappings/analyze
+{
+  "requirement_ids": ["REQ-0001", "REQ-0002"]
+}
+```
+
+**Response (201 Created)**
+```json
+[
+  {
+    "requirement_id": "REQ-0001",
+    "mappings_created": 3,
+    "mapping_ids": ["MAP-0001", "MAP-0002", "MAP-0003"],
+    "warnings": []
+  },
+  {
+    "requirement_id": "REQ-0002",
+    "mappings_created": 2,
+    "mapping_ids": ["MAP-0004", "MAP-0005"],
+    "warnings": ["Procedure PRC-AML-010 has no active version"]
+  }
+]
+```
+
+**Response (400 Bad Request)**
+```json
+{
+  "detail": "Requirement list is empty"
+}
+```
+
+**Response (500 on error)**
+```json
+{
+  "detail": "Impact analysis failed: ..."
+}
+```
+
+**Notes:**
+- Requires OPENROUTER_API_KEY environment variable
+- Only compares requirements to procedures in the same domain (filtered)
+- Mapping IDs are generated sequentially globally
+- All mappings start with human_status = PENDING_REVIEW
+- Suggested modifications are grounded with actual chunk offsets
+- A mapping is stored for every procedure analysed, **also when no modification is suggested or none could be located in the procedure text** (`suggested_modifications: null`): the assessment (e.g. `COVERED`) is kept
+- A requirement × procedure pair that already has a mapping is not analysed again (no LLM call, warning `... already analysed: mapping kept as is`)
+- Warnings are returned for individual failures; request doesn't fail entirely
+- Review mappings via GET /api/mappings/all
+
+---
+
+## 4. Regulatory Requirements
+
+### List Regulatory Requirements
+
+#### `GET /api/requirements`
+Get all regulatory requirements with optional filtering.
+
+**Query Parameters (all optional)**
+- `domain` (optional): Filter by domain (e.g., AML/CFT, KYC, DATA_PROTECTION)
+- `risk_level` (optional): Filter by risk level (LOW, MEDIUM, HIGH)
+- `language` (optional): Filter by language (EN, FR)
+- `status` (optional): Filter by status (ACTIVE, SUPERSEDED)
+- `limit` (integer): Max results per page (default: 50, max: 200)
+- `offset` (integer): Number of results to skip for pagination (default: 0)
+
+**Authentication** Required (Bearer token)
+
+**Request Examples**
+```
+GET /api/requirements
+GET /api/requirements?risk_level=HIGH&limit=100
+GET /api/requirements?domain=AML/CFT&language=FR
+GET /api/requirements?status=ACTIVE&limit=50
+```
+
+**Response (200 OK)**
+```json
+{
+  "total": 25,
+  "items": [
+    {
+      "requirement_id": "REQ-0001",
+      "source_document_id": "EXT-EU-AML-001",
+      "title": "Risk classification",
+      "title_lang_fr": "Classification des risques",
+      "domain": "AML/CFT",
+      "language": "EN",
+      "requirement_text": "Customers must be classified using documented money-laundering and terrorist-financing risk factors.",
+      "requirement_text_lang_fr": "Les clients doivent être classés selon les facteurs documentés de risque de blanchiment de capitaux et de financement du terrorisme.",
+      "risk_level": "MEDIUM",
+      "source_reference": "Section 3",
+      "status": "ACTIVE",
+      "evidence": "This requirement is supported by the following evidence: Customer classification matrices are defined in Section 3.2 of the regulation.",
+      "created_at": "2026-09-10T10:00:00",
+      "updated_at": "2026-09-10T10:00:00"
+    }
+  ],
+  "limit": 50,
+  "offset": 0,
+  "document_ids_queried": []
+}
+```
+
+**Response (401 Unauthorized)**
+```json
+{
+  "detail": "Not authenticated"
+}
+```
+
+---
+
+### List Requirements by Source Document IDs
+
+#### `GET /api/requirements/by-documents`
+Get regulatory requirements linked to a provided list of source document IDs with optional filtering.
+
+**Query Parameters**
+- `document_ids` (required, list): One or more source document IDs to filter by
+- `domain` (optional): Filter by domain (e.g., AML/CFT, KYC, DATA_PROTECTION)
+- `risk_level` (optional): Filter by risk level (LOW, MEDIUM, HIGH)
+- `language` (optional): Filter by language (EN, FR)
+- `status` (optional): Filter by status (ACTIVE, SUPERSEDED)
+- `limit` (integer): Max results per page (default: 50, max: 200)
+- `offset` (integer): Number of results to skip for pagination (default: 0)
+
+**Authentication** Required (Bearer token)
+
+**Request Examples**
+```
+GET /api/requirements/by-documents?document_ids=EXT-EU-AML-001
+GET /api/requirements/by-documents?document_ids=EXT-EU-AML-001&document_ids=EXT-EBA-KYC-002
+GET /api/requirements/by-documents?document_ids=EXT-EU-AML-001&risk_level=HIGH&limit=100
+GET /api/requirements/by-documents?document_ids=EXT-ACPR-LCBFT-003&language=FR&domain=AML/CFT
+```
+
+**Response (200 OK)**
+```json
+{
+  "total": 12,
+  "items": [
+    {
+      "requirement_id": "REQ-0001",
+      "source_document_id": "EXT-EU-AML-001",
+      "title": "Risk classification",
+      "title_lang_fr": "Classification des risques",
+      "domain": "AML/CFT",
+      "language": "EN",
+      "requirement_text": "Customers must be classified using documented money-laundering and terrorist-financing risk factors.",
+      "requirement_text_lang_fr": "Les clients doivent être classés selon les facteurs documentés de risque de blanchiment de capitaux et de financement du terrorisme.",
+      "risk_level": "MEDIUM",
+      "source_reference": "Section 3",
+      "status": "ACTIVE",
+      "evidence": "Section 3.2: Each customer shall be assessed and classified into one of the\nfollowing risk categories based on documented factors:\n- Low Risk: Established customers with transparent beneficial ownership\n- Medium Risk: Standard commercial entities\n- High Risk: Entities with opaque structures or high-risk jurisdictions"
+    },
+    {
+      "requirement_id": "REQ-0002",
+      "source_document_id": "EXT-EU-AML-001",
+      "title": "Enhanced due diligence",
+      "title_lang_fr": "Diligence renforcée",
+      "domain": "AML/CFT",
+      "language": "EN",
+      "requirement_text": "High-risk customers require enhanced due diligence and documented approval.",
+      "requirement_text_lang_fr": "Les clients à risque élevé nécessitent une diligence renforcée et une approbation documentée.",
+      "risk_level": "HIGH",
+      "source_reference": "Section 4",
+      "status": "ACTIVE",
+      "evidence": "Section 4.1: For customers classified as High Risk, the following enhanced due diligence\nmeasures shall be implemented:\n1. In-depth beneficial ownership verification\n2. Source of funds confirmation\n3. Purpose and nature of relationship analysis\n4. Senior management approval required before account opening"
+    }
+  ],
+  "limit": 50,
+  "offset": 0,
+  "document_ids_queried": [
+    "EXT-EU-AML-001",
+    "EXT-EBA-KYC-002"
+  ]
+}
+```
+
+**Response (400 Bad Request)**
+```json
+{
+  "detail": "At least one document_id is required"
+}
+```
+
+**Response (401 Unauthorized)**
+```json
+{
+  "detail": "Not authenticated"
+}
+```
+
+---
+
+### Get Requirement by ID
+
+#### `GET /api/requirements/{requirement_id}`
+Retrieve a single regulatory requirement by its ID.
+
+**Path Parameters**
+- `requirement_id` (required): The ID of the requirement (e.g., REQ-0001)
+
+**Authentication** Required (Bearer token)
+
+**Request Example**
+```
+GET /api/requirements/REQ-0001
+```
+
+**Response (200 OK)**
+```json
+{
+  "requirement_id": "REQ-0001",
+  "source_document_id": "EXT-EU-AML-001",
+  "title": "Risk classification",
+  "title_lang_fr": "Classification des risques",
+  "domain": "AML/CFT",
+  "language": "EN",
+  "requirement_text": "Customers must be classified using documented money-laundering and terrorist-financing risk factors.",
+  "requirement_text_lang_fr": "Les clients doivent être classés selon les facteurs documentés de risque de blanchiment de capitaux et de financement du terrorisme.",
+  "risk_level": "MEDIUM",
+  "source_reference": "Section 3",
+  "status": "ACTIVE",
+  "evidence": "This requirement is supported by the following evidence: Customer classification matrices are defined in Section 3.2 of the regulation.",
+  "created_at": "2026-09-10T10:00:00",
+  "updated_at": "2026-09-10T10:00:00"
+}
+```
+
+**Response (404 Not Found)**
+```json
+{
+  "detail": "Requirement not found"
+}
+```
+
+---
+
+## 4.5. Procedures
+
+### List All Procedures
+
+#### `GET /api/procedures`
+Get all procedures with optional filtering.
+
+**Query Parameters (all optional)**
+- `domain` (optional): Filter by domain (e.g., AML/CFT, KYC, DATA_PROTECTION)
+- `status` (optional): Filter by status (ACTIVE, SUPERSEDED)
+- `limit` (integer): Max results per page (default: 50, max: 200)
+- `offset` (integer): Number of results to skip for pagination (default: 0)
+
+**Authentication** Required (Bearer token)
+
+**Request Examples**
+```
+GET /api/procedures
+GET /api/procedures?domain=AML/CFT&limit=100
+GET /api/procedures?status=ACTIVE
+GET /api/procedures?domain=KYC&limit=50
+```
+
+**Response (200 OK)**
+```json
+{
+  "total": 15,
+  "items": [
+    {
+      "procedure_id": "PRC-AML-007",
+      "name": "Risk Classification Process",
+      "domain": "AML/CFT",
+      "owner": "AML Team",
+      "status": "ACTIVE",
+      "current_version": "2.0",
+      "created_at": "2026-09-10T10:00:00",
+      "updated_at": "2026-09-10T10:00:00",
+      "document": {
+        "document_id": "INT-PROC-AML",
+        "title": "Internal AML Procedures",
+        "category": "INTERNAL",
+        "document_type": "PROCEDURE",
+        "origin_code": null,
+        "origin_name": null,
+        "domain": "AML/CFT",
+        "language": "EN",
+        "summary": "Internal procedures for AML/CFT compliance including customer classification and monitoring.",
+        "current_version": "2.0",
+        "current_file_path": "documents/internal/INT-PROC-AML__v2_0__EN.md",
+        "data_classification": "CONCERNING_CUSTOMER",
+        "created_at": "2026-09-10T09:00:00",
+        "updated_at": "2026-09-10T09:00:00",
+        "published_at": "2026-09-10T09:30:00"
+      }
+    }
+  ],
+  "limit": 50,
+  "offset": 0
+}
+```
+
+**Response (401 Unauthorized)**
+```json
+{
+  "detail": "Not authenticated"
+}
+```
+
+---
+
+### Get Procedure by ID
+
+#### `GET /api/procedures/{procedure_id}`
+Retrieve a single procedure by its ID.
+
+**Path Parameters**
+- `procedure_id` (required): The ID of the procedure (e.g., PRC-AML-007)
+
+**Authentication** Required (Bearer token)
+
+**Request Example**
+```
+GET /api/procedures/PRC-AML-007
+```
+
+**Response (200 OK)**
+```json
+{
+  "procedure_id": "PRC-AML-007",
+  "document_id": "INT-PROC-AML",
+  "name": "Risk Classification Process",
+  "domain": "AML/CFT",
+  "owner": "AML Team",
+  "status": "ACTIVE",
+  "current_version": "2.0",
+  "created_at": "2026-09-10T10:00:00",
+  "updated_at": "2026-09-10T10:00:00"
+}
+```
+
+**Response (404 Not Found)**
+```json
+{
+  "detail": "Procedure not found"
+}
+```
+
+---
+
+## 5. Requirement-Procedure Mappings
+
+### Update Mapping Human Review Status
+
+#### `PUT /api/mappings/{mapping_id}/human-status`
+Update the human review status of a requirement-procedure mapping.
+
+**Path Parameters**
+- `mapping_id` (required): The ID of the mapping (e.g., MAP-0001)
+
+**Request Body**
+- `human_status` (required): One of the following:
+  - `PENDING_REVIEW` — Awaiting human review (default)
+  - `ESCALATE` — Escalate to senior review/approval. **`assignee` is required** and is saved
+    on the procedure document (`documents.assignee`, same field as `PUT /api/documents/{id}/assignee`)
+    and logged in that document's history (`GET /api/documents/{id}/history`) when it changes
+  - `ACCEPT` — Approved by human reviewer. The mapping's `suggested_modifications` are applied
+    to the procedure's active version and saved as a **new version** (`VER-{doc}-{NN}`, previous
+    one SUPERSEDED, `documents.current_version` bumped, `created_by` = current user). No new
+    version if there are no suggested modifications or if the mapping is already `ACCEPT`.
+  - `REJECT` — Rejected by human reviewer (status only)
+- `assignee` (required for `ESCALATE`, ignored otherwise): user_id or email
+- `comment` (optional): reviewer's chosen action, kept in the mapping history
+
+Every successful call is recorded in `mapping_history` (see `GET /api/mappings/history`).
+
+**Authentication** Required (Bearer token)
+
+**Request Examples**
+```json
+PUT /api/mappings/MAP-0001/human-status
+{"human_status": "ACCEPT"}
+
+PUT /api/mappings/MAP-0001/human-status
+{"human_status": "ESCALATE", "assignee": "USR-0001"}
+
+PUT /api/mappings/MAP-0001/human-status
+{"human_status": "REJECT"}
+```
+
+**Response (200 OK)**
+```json
+{
+  "mapping_id": "MAP-0001",
+  "requirement_id": "REQ-0001",
+  "procedure_id": "PRC-AML-007",
+  "assessment": "COVERED",
+  "confidence": 0.93,
+  "explanation": "The internal procedure contains explicit controls...",
+  "recommended_action": "No immediate update proposed...",
+  "explanation_lang_fr": "La procédure interne contient des contrôles explicites...",
+  "recommended_action_lang_fr": "Aucune mise à jour immédiate proposée...",
+  "human_status": "ACCEPT",
+  "suggested_modifications": null
+}
+```
+
+**Response (400 Bad Request)**
+```json
+{
+  "detail": "Invalid human_status. Allowed values: PENDING_REVIEW, ESCALATE, ACCEPT, REJECT"
+}
+```
+
+**Response (400 Bad Request)** — `ESCALATE` without `assignee`
+```json
+{
+  "detail": "assignee is required to escalate"
+}
+```
+
+**Response (404 Not Found)**
+```json
+{
+  "detail": "Mapping not found"
+}
+```
+
+**Response (409 Conflict)** — `ACCEPT` when the procedure text changed since the analysis
+```json
+{
+  "detail": "Procedure text changed since the analysis, re-run it: Original text no longer found in chunk 2: '...'"
+}
+```
+
+---
+
+### Mapping Decision History
+
+#### `GET /api/mappings/history`
+Get decision history for mappings, filtered by requirement IDs or specific mapping ID.
+
+History records every human decision (accept, reject, escalate) made on a mapping, newest first.
+
+**Query Parameters**
+- `requirement_ids` (optional, repeatable): Filter by requirement IDs (e.g., `?requirement_ids=REQ-0001&requirement_ids=REQ-0002`)
+- `mapping_id` (optional): Filter by specific mapping ID (e.g., `?mapping_id=MAP-0001`)
+
+**Note:** At least one of `requirement_ids` or `mapping_id` must be provided.
+
+**Authentication** Required (Bearer token)
+
+**Request Examples**
+```
+GET /api/mappings/history?requirement_ids=REQ-0001&requirement_ids=REQ-0002
+GET /api/mappings/history?mapping_id=MAP-0001
+```
+
+**Response (200 OK)**
+```json
+[
+  {
+    "history_id": "MHI-3f2c…",
+    "mapping_id": "MAP-0005",
+    "requirement_id": "REQ-0003",
+    "procedure_id": "INT-EU-002",
+    "from_status": "ESCALATE",
+    "to_status": "ACCEPT",
+    "assignee": null,
+    "new_version_id": "VER-INT-EU-002-02",
+    "comment": "Apply as proposed",
+    "actor": "USR-8986…",
+    "created_at": "2026-09-21T09:12:03"
+  }
+]
+```
+
+**Response (400 Bad Request)**
+```json
+{
+  "detail": "At least one of requirement_ids or mapping_id must be provided"
+}
+```
+
+---
+
+## Old Requirement-Procedure Mappings (Keep reading below)
+
+### List All Mappings (Flat)
+
+#### `GET /api/mappings/all`
+Get a flat list of all requirement-procedure mappings with optional filters.
+
+**Query Parameters**
+- `requirement_id` (optional): Filter by specific requirement ID
+- `procedure_id` (optional): Filter by specific procedure ID
+- `assessment` (optional): Filter by assessment status (COVERED, PARTIALLY_COVERED, POTENTIAL_GAP, HUMAN_REVIEW)
+- `human_status` (optional): Filter by human review status (PENDING_REVIEW, ACCEPTED, REJECTED, ESCALATED)
+- `limit` (integer): Max results per page (default: 50, max: 200)
+- `offset` (integer): Number of results to skip for pagination (default: 0)
+
+**Authentication** Required (Bearer token)
+
+**Request Examples**
+```
+GET /api/mappings/all
+GET /api/mappings/all?requirement_id=REQ-0001
+GET /api/mappings/all?assessment=COVERED&limit=100
+GET /api/mappings/all?human_status=PENDING_REVIEW
+```
+
+**Response (200 OK)**
+```json
+{
+  "total": 12,
+  "items": [
+    {
+      "mapping_id": "MAP-0001",
+      "requirement_id": "REQ-0001",
+      "procedure_id": "PRC-AML-007",
+      "assessment": "COVERED",
+      "confidence": 0.93,
+      "explanation": "The internal procedure contains explicit controls...",
+      "recommended_action": "No immediate update proposed...",
+      "explanation_lang_fr": "La procédure interne contient des contrôles explicites...",
+      "recommended_action_lang_fr": "Aucune mise à jour immédiate proposée...",
+      "human_status": "PENDING_REVIEW",
+      "suggested_modifications": [
+        {
+          "location": {
+            "chunk_no": 1,
+            "start_offset": 245,
+            "end_offset": 310
+          },
+          "original_text": "daily monitoring",
+          "new_text": "continuous real-time monitoring with automated alerts"
+        }
+      ]
+    }
+  ],
+  "limit": 50,
+  "offset": 0
+}
+```
+
+---
+
+#### `GET /api/mappings/{mapping_id}`
+Get complete details of a specific requirement-procedure mapping with all linked data.
+
+**Path Parameters**
+- `mapping_id` (required): The ID of the mapping to retrieve (e.g., MAP-0001)
+
+**Authentication** Required (Bearer token)
+
+**Request Examples**
+```
+GET /api/mappings/MAP-0001
+```
+
+**Response (200 OK)**
+```json
+{
+  "mapping": {
+    "mapping_id": "MAP-0001",
+    "requirement_id": "REQ-0001",
+    "procedure_id": "INT-PROC-AML-001",
+    "assessment": "COVERED",
+    "confidence": 0.93,
+    "explanation": "The internal procedure contains explicit controls matching the requirement.",
+    "recommended_action": "No immediate update proposed.",
+    "explanation_lang_fr": "La procédure interne contient des contrôles explicites...",
+    "recommended_action_lang_fr": "Aucune mise à jour immédiate proposée...",
+    "human_status": "PENDING_REVIEW",
+    "suggested_modifications": [
+      {
+        "location": {
+          "chunk_no": 1,
+          "start_offset": 245,
+          "end_offset": 310
+        },
+        "original_text": "daily monitoring",
+        "new_text": "continuous real-time monitoring with automated alerts"
+      }
+    ]
+  },
+  "requirement": {
+    "requirement_id": "REQ-0001",
+    "source_document_id": "EXT-EU-AML-001",
+    "title": "Risk classification",
+    "domain": "AML/CFT",
+    "language": "en",
+    "risk_level": "MEDIUM",
+    "source_reference": "Article 5, Section 2",
+    "status": "ACTIVE",
+    "evidence": "Member States shall require obliged entities to apply customer due diligence measures..."
+  },
+  "requirement_source_document": {
+    "document_id": "EXT-EU-AML-001",
+    "title": "ACPR Instruction on Customer Knowledge (KYC)",
+    "category": "REGULATION",
+    "document_type": "REGULATION",
+    "origin_code": "EU",
+    "origin_name": "European Union",
+    "domain": "AML/CFT",
+    "language": "en",
+    "data_classification": "PUBLIC",
+    "current_version": "1.0",
+    "created_at": "2026-01-15T10:30:00Z",
+    "updated_at": "2026-01-15T10:30:00Z"
+  },
+  "procedure": {
+    "procedure_id": "INT-PROC-AML-001",
+    "document_id": "INT-PROC-AML-001",
+    "name": "AML Risk Classification Procedure",
+    "domain": "AML/CFT",
+    "owner": "Compliance Team",
+    "status": null,
+    "current_version": "2.1",
+    "created_at": "2025-11-20T14:22:00Z",
+    "updated_at": "2026-02-01T09:15:00Z"
+  }
+}
+```
+
+**Error Response (404 Not Found)**
+```json
+{
+  "detail": "Mapping not found"
+}
+```
+
+---
+
+### Requirements with Their Procedures (Nested)
+
+#### `GET /api/mappings/requirements-to-procedures`
+Get nested structure: list of requirements with all procedures they map to.
+
+**Query Parameters**
+- `requirement_ids` (required, list): List of requirement IDs to expand
+- `assessment` (optional): Filter mappings by assessment status
+- `risk_level` (optional): Filter requirements by risk level (LOW, MEDIUM, HIGH)
+
+**Authentication** Required (Bearer token)
+
+**Request Examples**
+```
+GET /api/mappings/requirements-to-procedures?requirement_ids=REQ-0001
+GET /api/mappings/requirements-to-procedures?requirement_ids=REQ-0001&requirement_ids=REQ-0002
+GET /api/mappings/requirements-to-procedures?requirement_ids=REQ-0001&assessment=COVERED
+```
+
+**Response (200 OK)**
+```json
+{
+  "total_requirements": 2,
+  "total_mappings": 5,
+  "data": [
+    {
+      "requirement": {
+        "requirement_id": "REQ-0001",
+        "source_document_id": "EXT-EU-AML-001",
+        "title": "Risk classification",
+        "title_lang_fr": "Classification des risques",
+        "domain": "AML/CFT",
+        "risk_level": "MEDIUM",
+        "status": "ACTIVE"
+      },
+      "procedures": [
+        {
+          "procedure": {
+            "procedure_id": "PRC-AML-007",
+            "document_id": "INT-PROC-AML",
+            "name": "Risk Classification Process",
+            "domain": "AML/CFT",
+            "status": "ACTIVE"
+          },
+          "mapping": {
+            "mapping_id": "MAP-0001",
+            "assessment": "COVERED",
+            "confidence": 0.93,
+            "explanation": "...",
+            "recommended_action": "...",
+            "explanation_lang_fr": "...",
+            "recommended_action_lang_fr": "...",
+            "human_status": "PENDING_REVIEW",
+            "suggested_modifications": null
+          }
+        }
+      ],
+      "total_procedures": 2
+    }
+  ]
+}
+```
+
+---
+
+### Procedures with Their Requirements (Nested)
+
+#### `GET /api/mappings/procedures-to-requirements`
+Get nested structure: list of procedures with all requirements they address.
+
+**Query Parameters**
+- `procedure_ids` (required, list): List of procedure IDs to expand
+- `assessment` (optional): Filter mappings by assessment status
+- `domain` (optional): Filter requirements by domain (AML/CFT, KYC, etc.)
+
+**Authentication** Required (Bearer token)
+
+**Request Examples**
+```
+GET /api/mappings/procedures-to-requirements?procedure_ids=PRC-AML-007
+GET /api/mappings/procedures-to-requirements?procedure_ids=PRC-AML-007&assessment=COVERED
+GET /api/mappings/procedures-to-requirements?procedure_ids=PRC-KYC-002&domain=KYC
+```
+
+**Response (200 OK)**
+```json
+{
+  "total_procedures": 1,
+  "total_mappings": 3,
+  "data": [
+    {
+      "procedure": {
+        "procedure_id": "PRC-AML-007",
+        "document_id": "INT-PROC-AML",
+        "name": "AML Transaction Monitoring",
+        "domain": "AML/CFT",
+        "status": "ACTIVE"
+      },
+      "requirements": [
+        {
+          "requirement": {
+            "requirement_id": "REQ-0001",
+            "source_document_id": "EXT-EU-AML-001",
+            "title": "Risk classification",
+            "title_lang_fr": "Classification des risques",
+            "domain": "AML/CFT",
+            "risk_level": "MEDIUM"
+          },
+          "mapping": {
+            "mapping_id": "MAP-0001",
+            "assessment": "COVERED",
+            "confidence": 0.93,
+            "explanation": "...",
+            "recommended_action": "...",
+            "explanation_lang_fr": "...",
+            "recommended_action_lang_fr": "...",
+            "human_status": "PENDING_REVIEW",
+            "suggested_modifications": null
+          }
+        }
+      ],
+      "total_requirements": 3
+    }
+  ]
+}
+```
+
+---
+
+## 5.5. Dashboard
+
+### Portfolio (every regulation with its requirements and mappings)
+
+#### `GET /api/dashboard/portfolio`
+Everything the dashboard needs, in one response: every regulation (document of category
+`EXTERNAL`), the requirements of those regulations, and each requirement with the procedures
+it maps to.
+
+It returns the same items as three existing endpoints, which the dashboard called one after
+the other (`1 + N + N` requests for `N` regulations before 2026-10-07):
+
+| Field | Same items as |
+|---|---|
+| `documents` | `GET /api/documents?category=EXTERNAL` (`items`), ordered by `created_at`, `document_id` |
+| `requirements` | `GET /api/requirements/by-documents` (`items`) for those documents, ordered by `created_at`, `requirement_id` |
+| `mappings` | `GET /api/mappings/requirements-to-procedures` (`data`) for those requirements |
+| `escalation_assignees` | `mapping_id` → `assignee` of the latest `ESCALATE` row in `GET /api/mappings/history`, only for mappings whose `human_status` is currently `ESCALATE` |
+
+No query parameter, no pagination: the whole portfolio is returned.
+
+**Authentication** Required (Bearer token)
+
+**Response (200 OK)**
+```json
+{
+  "documents": [
+    {
+      "document_id": "EXT-EU-AML-001",
+      "title": "AML Directive",
+      "category": "EXTERNAL",
+      "domain": "AML/CFT",
+      "language": "EN",
+      "summary": "...",
+      "current_version": "1.0",
+      "created_at": "2026-09-01T08:00:00",
+      "assignee": "USR-0001"
+    }
+  ],
+  "requirements": [
+    {
+      "requirement_id": "REQ-0001",
+      "source_document_id": "EXT-EU-AML-001",
+      "title": "Risk classification",
+      "title_lang_fr": "Classification des risques",
+      "requirement_text": "...",
+      "risk_level": "MEDIUM",
+      "source_reference": "Art. 8",
+      "status": "ACTIVE"
+    }
+  ],
+  "mappings": [
+    {
+      "requirement": { "requirement_id": "REQ-0001", "source_document_id": "EXT-EU-AML-001" },
+      "procedures": [
+        {
+          "procedure": { "procedure_id": "INT-PROC-AML", "document_id": "INT-PROC-AML", "name": "Risk Classification Process" },
+          "mapping": { "mapping_id": "MAP-0001", "assessment": "POTENTIAL_GAP", "human_status": "ESCALATE" }
+        }
+      ],
+      "total_procedures": 1
+    }
+  ],
+  "escalation_assignees": { "MAP-0001": "USR-0002" }
+}
+```
+
+**Response (401)** missing, invalid or expired token.
+
+---
+
+## 6. User Management
+
+### List Users
+
+#### `GET /api/users`
+Get a paginated list of users with optional filtering.
+
+**Query Parameters**
+- `role` (optional): Filter by role (e.g., COMPLIANCE_OFFICER)
+- `is_active` (optional): Filter by active status (true/false)
+- `limit` (integer): Max results per page (default: 50, max: 200)
+- `offset` (integer): Number of results to skip for pagination (default: 0)
+
+**Authentication** Required (Bearer token)
+
+**Request Examples**
+```
+GET /api/users
+GET /api/users?role=COMPLIANCE_OFFICER
+GET /api/users?is_active=true&limit=100
+GET /api/users?role=COMPLIANCE_OFFICER&is_active=true&limit=50
+```
+
+**Response (200 OK)**
+```json
+{
+  "total": 4,
+  "items": [
+    {
+      "user_id": "USR-a1b2c3d4e5f6g7h8i9j0",
+      "email": "user@example.com",
+      "full_name": "John Doe",
+      "role": "COMPLIANCE_OFFICER",
+      "is_active": true,
+      "created_at": "2026-09-05T12:16:17.670429"
+    }
+  ],
+  "limit": 50,
+  "offset": 0
+}
+```
+
+**Response (401 Unauthorized)**
+```json
+{
+  "detail": "Not authenticated"
+}
+```
+
+---
+
+### Get User by ID
+
+#### `GET /api/users/{user_id}`
+Retrieve a single user by their ID.
+
+**Path Parameters**
+- `user_id` (required): The ID of the user (e.g., USR-a1b2c3d4e5f6g7h8i9j0)
+
+**Authentication** Required (Bearer token)
+
+**Request Example**
+```
+GET /api/users/USR-a1b2c3d4e5f6g7h8i9j0
+```
+
+**Response (200 OK)**
+```json
+{
+  "user_id": "USR-a1b2c3d4e5f6g7h8i9j0",
+  "email": "user@example.com",
+  "full_name": "John Doe",
+  "role": "COMPLIANCE_OFFICER",
+  "is_active": true,
+  "created_at": "2026-09-05T12:16:17.670429"
+}
+```
+
+**Response (404 Not Found)**
+```json
+{
+  "detail": "User not found"
+}
+```
+
+---
+
+### Update User Role
+
+#### `PUT /api/users/{user_id}/role`
+Update the role of a user. **Administrators only**: the caller's role must be `COMPLIANCE_ADMIN` or `Admin Base de Connaissances`, otherwise `403 Forbidden`.
+
+**Path Parameters**
+- `user_id` (required): The ID of the user (e.g., USR-a1b2c3d4e5f6g7h8i9j0)
+
+**Request Body**
+- `role` (required): The new role for the user (e.g., COMPLIANCE_OFFICER, ANALYST, ADMIN)
+
+**Authentication** Required (Bearer token)
+
+**Request Example**
+```json
+PUT /api/users/USR-a1b2c3d4e5f6g7h8i9j0/role
+{"role": "ANALYST"}
+```
+
+**Response (200 OK)**
+```json
+{
+  "user_id": "USR-a1b2c3d4e5f6g7h8i9j0",
+  "email": "user@example.com",
+  "full_name": "John Doe",
+  "role": "ANALYST",
+  "is_active": true,
+  "created_at": "2026-09-05T12:16:17.670429"
+}
+```
+
+**Response (404 Not Found)**
+```json
+{
+  "detail": "User not found"
+}
+```
+
+---
+
+## 7. Authentication
+
+### Signup
+
+#### `POST /api/auth/signup`
+Create a new user account and receive a JWT access token.
+
+**Request Body**
+```json
+{
+  "email": "user@example.com",
+  "password": "SecurePassword123",
+  "full_name": "John Doe"
+}
+```
+
+**Field Requirements**
+- `email` (required): Valid email address
+- `password` (required): Minimum 8 characters, at most 72 bytes (bcrypt limit)
+- `full_name` (optional): User's full name
+- A new account always gets the role `COMPLIANCE_OFFICER`; a `role` sent in the body is ignored. An administrator changes it with `PUT /api/users/{user_id}/role`
+
+**Response (201 Created)**
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIs...",
+  "token_type": "bearer",
+  "user": {
+    "user_id": "USR-a1b2c3d4e5f6g7h8i9j0",
+    "email": "user@example.com",
+    "full_name": "John Doe",
+    "role": "COMPLIANCE_OFFICER",
+    "is_active": true,
+    "created_at": "2026-09-05T11:58:00.322915"
+  }
+}
+```
+
+**Response (409 Conflict)**
+```json
+{
+  "detail": "Email already registered"
+}
+```
+
+**Response (422 Unprocessable Entity)**
+```json
+{
+  "detail": [
+    {
+      "type": "value_error",
+      "loc": ["body", "email"],
+      "msg": "invalid email format",
+      "input": "invalid-email"
+    }
+  ]
+}
+```
+
+---
+
+### Signin
+
+#### `POST /api/auth/signin`
+Authenticate a user by email/password and receive an access token.
+
+**Request Body**
+```json
+{
+  "email": "user@example.com",
+  "password": "SecurePassword123"
+}
+```
+
+**Field Requirements**
+- `email` (required): Valid email address
+- `password` (required): User's password
+
+**Response (200 OK)**
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIs...",
+  "token_type": "bearer",
+  "user": {
+    "user_id": "USR-a1b2c3d4e5f6g7h8i9j0",
+    "email": "user@example.com",
+    "full_name": "John Doe",
+    "role": "COMPLIANCE_OFFICER",
+    "is_active": true,
+    "created_at": "2026-09-05T11:58:00.322915"
+  }
+}
+```
+
+**Response (401 Unauthorized)**
+```json
+{
+  "detail": "Invalid email or password"
+}
+```
+
+**Response (403 Forbidden)**
+```json
+{
+  "detail": "Account is disabled"
+}
+```
+
+---
+
+### Get Current User
+
+#### `GET /api/auth/me`
+Retrieve the currently authenticated user's profile.
+
+**Authentication**
+Required. Use the access token from signup/signin in the Authorization header:
+```
+Authorization: Bearer <access_token>
+```
+
+**Response (200 OK)**
+```json
+{
+  "user_id": "USR-a1b2c3d4e5f6g7h8i9j0",
+  "email": "user@example.com",
+  "full_name": "John Doe",
+  "role": "COMPLIANCE_OFFICER",
+  "is_active": true,
+  "created_at": "2026-09-05T11:58:00.322915"
+}
+```
+
+**Response (401 Unauthorized)**
+```json
+{
+  "detail": "Not authenticated"
+}
+```
+
+---
+
+## 8. Compliance Copilot
+
+#### `POST /api/copilot/ask`
+Answer a question (FR or EN) from the indexed corpus: documents, requirements, mappings and the text of active procedure versions. Model: `qwen/qwen3.7-plus` via OpenRouter, key `CHAT_BOT_KEY`.
+
+**Authentication** Required (Bearer token)
+
+**Request Body**
+```json
+{
+  "question": "Et parmi elles, lesquelles sont à risque élevé ?",
+  "history": [
+    { "question": "Combien d'exigences restent à traiter ?", "answer": "118 exigences…" }
+  ],
+  "locale": "EN"
+}
+```
+
+**Response (200 OK)**
+```json
+{
+  "answer": "118 exigences n'ont pas encore été analysées et 13 sont en attente de revue.",
+  "evidence": [
+    {
+      "document_id": "EXT-EU-001",
+      "document_title": "...",
+      "section_reference": "Article 14.2",
+      "excerpt": "verbatim source text",
+      "language": "EN"
+    }
+  ]
+}
+```
+
+**Notes:**
+- `history` (optional, max 4 items, oldest first): previous exchanges, so follow-up questions have context. The frontend keeps the conversation; nothing is stored server-side.
+- Language: the answer follows the language of the latest question (FR or EN), even mid-conversation. `locale` (optional, `FR` default) is the interface language, used only when the question has no clear language (e.g. `REQ-0001 ?`).
+- Reasoning is disabled for this route (`LLMClient.call(..., reasoning=False)`): ~7 s instead of ~25 s.
+- `evidence` is rebuilt server-side from the ids the model cites (requirement `evidence` or procedure chunk `content`, verbatim); unknown ids are dropped. Counting questions are answered from precomputed stats and may carry no evidence.
+- `503` if `CHAT_BOT_KEY` is not configured, `502` if the LLM call or its JSON parsing fails.
+
+---
+
+## Data Models
+
+### User
+```json
+{
+  "user_id": "USR-<hex>",
+  "email": "user@example.com",
+  "full_name": "John Doe",
+  "role": "COMPLIANCE_OFFICER",
+  "is_active": true,
+  "created_at": "2026-09-05T11:58:00.322915",
+  "updated_at": "2026-09-05T11:58:00.322915"
+}
+```
+
+### Token
+```json
+{
+  "access_token": "JWT token string",
+  "token_type": "bearer",
+  "user": { /* User object */ }
+}
+```
+
+---
+
+## Status Codes
+
+| Code | Meaning |
+|------|---------|
+| 200 | OK — request succeeded |
+| 201 | Created — resource created successfully |
+| 401 | Unauthorized — invalid/missing credentials or expired token |
+| 403 | Forbidden — authenticated but not allowed (disabled account, role change by a non-administrator, write action by a read-only role) |
+| 409 | Conflict — resource already exists (e.g., email taken) |
+| 422 | Unprocessable Entity — invalid input validation |
+| 500 | Internal Server Error |
+
+---
+
+## Authentication
+
+The API uses JWT (JSON Web Tokens) for authentication.
+
+1. **Signup or Signin** → receive `access_token`
+2. **Include token in requests** → `Authorization: Bearer <access_token>`
+3. **Token expires** → re-authenticate to get a new one (default: 60 minutes)
+
+### Bearer Token Example
+```bash
+curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..." \
+  http://localhost:8000/api/auth/me
+```
+
+---
+
+## Rate Limiting
+Currently not implemented. To be added as needed.
+
+---
+
+## Error Handling
+
+All errors follow this format:
+```json
+{
+  "detail": "Error message describing what went wrong"
+}
+```
+
+---
+
+## Testing with cURL
+
+### Get Documents (requires auth token first)
+```bash
+# 1. Signup to get a token
+TOKEN_RESP=$(curl -s -X POST http://localhost:8000/api/auth/signup \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "Password123"
+  }')
+TOKEN=$(echo $TOKEN_RESP | jq -r '.access_token')
+
+# 2. List all documents (first 10)
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/documents?limit=10"
+
+# 3. Filter by domain
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/documents?domain=AML/CFT&limit=5"
+
+# 4. Filter by language
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/documents?language=FR&limit=5"
+
+# 5. Search by title
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/documents?title=KYC"
+
+# 6. Get a single document
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/documents/EXT-EU-AML-001"
+
+# 7. Get document content (all chunks) by version ID
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/documents/content/VER-EXT-EU-AML-001-01" | jq '.total_chunks, .chunks[0].section_title'
+```
+
+### Testing Content Endpoint
+```bash
+# Get a version ID first
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/documents?limit=1" | jq -r '.items[0].document_id'
+
+# Then get all content for that version
+VERSION_ID="VER-EXT-EU-AML-001-01"
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/documents/content/$VERSION_ID" | jq '{total_chunks, version_no: .version.version_no, first_chunk_title: .chunks[0].section_title}'
+```
+
+### Signup (Get Token First)
+For all the examples below, you'll need a token. Signup first:
+```bash
+TOKEN_RESP=$(curl -s -X POST http://localhost:8000/api/auth/signup \
+  -H "Content-Type: application/json" \
+  -d '{"email":"test@example.com","password":"Password123"}')
+TOKEN=$(echo $TOKEN_RESP | jq -r '.access_token')
+```
+
+### Get Requirements by Document IDs
+```bash
+# Single document
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/requirements/by-documents?document_ids=EXT-EU-AML-001&limit=10"
+
+# Multiple documents
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/requirements/by-documents?document_ids=EXT-EU-AML-001&document_ids=EXT-EBA-KYC-002&limit=20"
+
+# Filter by risk level
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/requirements/by-documents?document_ids=EXT-EU-AML-001&risk_level=HIGH"
+
+# Filter by language
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/requirements/by-documents?document_ids=EXT-ACPR-LCBFT-003&language=FR"
+
+# Get single requirement
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/requirements/REQ-0001"
+
+### Get Requirement-Procedure Mappings
+```bash
+# Get all mappings (flat list)
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/mappings/all?limit=10"
+
+# Filter by assessment status
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/mappings/all?assessment=COVERED&limit=50"
+
+# Filter by human review status
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/mappings/all?human_status=PENDING_REVIEW"
+
+# Get requirements with their procedures (nested)
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/mappings/requirements-to-procedures?requirement_ids=REQ-0001"
+
+# Get procedures with their requirements (nested)
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/mappings/procedures-to-requirements?procedure_ids=PRC-AML-007"
+
+### Update Mapping Human Status
+```bash
+# Accept a mapping
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"human_status":"ACCEPT"}' \
+  "http://localhost:8000/api/mappings/MAP-0001/human-status"
+
+# Escalate a mapping for senior review
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"human_status":"ESCALATE"}' \
+  "http://localhost:8000/api/mappings/MAP-0001/human-status"
+
+# Reject a mapping
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"human_status":"REJECT"}' \
+  "http://localhost:8000/api/mappings/MAP-0001/human-status"
+
+# Reset to pending review
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"human_status":"PENDING_REVIEW"}' \
+  "http://localhost:8000/api/mappings/MAP-0001/human-status"
+```
+
+### Get Users
+```bash
+# List all users
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/users"
+
+# Filter by role
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/users?role=COMPLIANCE_OFFICER"
+
+# Filter by active status
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/users?is_active=true&limit=50"
+
+# Pagination
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/users?limit=100&offset=50"
+
+# Get single user
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/users/USR-a1b2c3d4e5f6g7h8i9j0"
+```
+
+### Signup
+```bash
+curl -X POST http://localhost:8000/api/auth/signup \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "test@example.com",
+    "password": "Password123",
+    "full_name": "Test User"
+  }'
+```
+
+### Signin
+```bash
+curl -X POST http://localhost:8000/api/auth/signin \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "test@example.com",
+    "password": "Password123"
+  }'
+```
+
+### Get Current User
+```bash
+curl -H "Authorization: Bearer <your_token>" \
+  http://localhost:8000/api/auth/me
+```
+
+### Health Check
+```bash
+curl http://localhost:8000/health
+```
+
+---
+
+## Interactive API Documentation
+
+When the server is running, visit:
+- **Swagger UI**: http://localhost:8000/docs
+- **ReDoc**: http://localhost:8000/redoc
+
+Both provide interactive exploration of all endpoints, schemas, and allow you to test calls directly.

@@ -1,0 +1,398 @@
+"use client";
+
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ChevronRight, Search, Trash2, UserRoundCheck } from "lucide-react";
+import { useTranslations } from "next-intl";
+import { useMemo, useState } from "react";
+import { toast } from "sonner";
+
+import { AssigneeName, AssigneeSelect } from "@/components/features/assignee-select";
+import {
+  DocumentFilters,
+  matchesDocumentFilters,
+  NO_DOCUMENT_FILTER,
+} from "@/components/features/document-filters";
+import { DocumentStatusBadge } from "@/components/features/document-status-badge";
+import { ReviewProgressBar } from "@/components/features/review-progress";
+import {
+  EmptyState,
+  ErrorState,
+  LoadingState,
+} from "@/components/features/query-state";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Link } from "@/i18n/navigation";
+import { fetchPortfolioSummary } from "@/lib/api/dashboard";
+import { notifyOtherTabs } from "@/lib/api/cross-tab";
+import { queryKeys } from "@/lib/api/query-keys";
+import { formatDateDDMMYYYY, formatLocalDate } from "@/lib/format-date";
+import {
+  deleteDocument,
+  fetchRegulations,
+  updateRegulationAssignee,
+} from "@/lib/api/regulations";
+import type { RegulationSummary } from "@/types/api";
+import { cn } from "cn";
+import { useSession } from "@/components/providers/session-provider";
+import { accessProfileForUser, canUploadRegulations } from "@/lib/access-profile";
+
+const ALL_AUTHORITIES = "ALL";
+type SortOrder = "newest" | "oldest" | "title";
+
+export function RegulationsView() {
+  const t = useTranslations("regulations");
+  const common = useTranslations("common");
+  const assigneeT = useTranslations("assignee");
+  const queryClient = useQueryClient();
+  const { user } = useSession();
+  const canEdit = canUploadRegulations(accessProfileForUser(user));
+
+  const [search, setSearch] = useState("");
+  const [authority, setAuthority] = useState<string>(ALL_AUTHORITIES);
+  const [sort, setSort] = useState<SortOrder>("newest");
+  const [filters, setFilters] = useState(NO_DOCUMENT_FILTER);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+
+  const regulationsQuery = useQuery({
+    queryKey: queryKeys.regulations(),
+    queryFn: fetchRegulations,
+  });
+
+  // Les compteurs des cartes viennent du même agrégat que le dashboard : une seule
+  // requête plutôt qu'un `summary` par carte.
+  const summaryQuery = useQuery({
+    queryKey: queryKeys.portfolioSummary(),
+    queryFn: fetchPortfolioSummary,
+  });
+
+  const assignMutation = useMutation({
+    mutationFn: (input: { regulationId: string; assigneeId: string }) =>
+      updateRegulationAssignee(input.regulationId, input.assigneeId),
+    onSuccess: async () => {
+      toast.success(assigneeT("updated"));
+      notifyOtherTabs();
+      await queryClient.invalidateQueries({ queryKey: queryKeys.regulations() });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.dashboard() });
+    },
+    onError: () => toast.error(assigneeT("updateFailed")),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (documentId: string) => deleteDocument(documentId),
+    onSuccess: async () => {
+      toast.success(t("deleteSuccess"));
+      setDeleteConfirmId(null);
+      notifyOtherTabs();
+      await queryClient.invalidateQueries({ queryKey: queryKeys.regulations() });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.dashboard() });
+    },
+    onError: () => toast.error(t("deleteFailed")),
+  });
+
+  const authorities = useMemo(
+    () =>
+      Array.from(
+        new Set((regulationsQuery.data ?? []).map((reg) => reg.authority_or_owner)),
+      ).sort((a, b) => a.localeCompare(b)),
+    [regulationsQuery.data],
+  );
+
+  const visibleRegulations = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    const filtered = (regulationsQuery.data ?? []).filter((reg) => {
+      const matchesSearch =
+        query === "" ||
+        reg.title.toLowerCase().includes(query) ||
+        reg.document_id.toLowerCase().includes(query);
+      const matchesAuthority =
+        authority === ALL_AUTHORITIES || reg.authority_or_owner === authority;
+      return matchesSearch && matchesAuthority && matchesDocumentFilters(reg, filters);
+    });
+    // Comparaison inversée pour "newest" : la date la plus récente en premier.
+    // Date d'import : `uploaded_at` (mock) ou `created_at` (backend réel, qui n'a pas
+    // `uploaded_at` — sans ce repli le tri ne changeait rien). Absente, elle est traitée
+    // comme la plus ancienne, pour ne pas faire remonter une donnée manquante en tête.
+    return [...filtered].sort((a, b) => {
+      if (sort === "title") return a.title.localeCompare(b.title);
+      const dateA = a.uploaded_at ?? a.created_at ?? "";
+      const dateB = b.uploaded_at ?? b.created_at ?? "";
+      return sort === "newest" ? dateB.localeCompare(dateA) : dateA.localeCompare(dateB);
+    });
+  }, [regulationsQuery.data, search, authority, sort, filters]);
+
+  if (regulationsQuery.isPending) return <LoadingState rows={3} />;
+  if (regulationsQuery.isError) {
+    return (
+      <ErrorState
+        error={regulationsQuery.error}
+        onRetry={() => void regulationsQuery.refetch()}
+      />
+    );
+  }
+  if (!regulationsQuery.data.length) return <EmptyState message={t("empty")} />;
+
+  const summaryByRegulation = new Map<string, RegulationSummary>(
+    (summaryQuery.data?.by_regulation ?? []).map((row) => [row.regulation_id, row]),
+  );
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative w-full max-w-xs">
+          <Search
+            className="absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
+            aria-hidden
+          />
+          <Input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder={t("searchByTitlePlaceholder")}
+            aria-label={t("searchByTitlePlaceholder")}
+            className="pl-8"
+          />
+        </div>
+
+        <Select value={authority} onValueChange={setAuthority}>
+          <SelectTrigger size="sm" aria-label={t("filterAuthority")} className="w-56">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL_AUTHORITIES}>
+              {t("filterAuthority")}: {t("filterAllAuthorities")}
+            </SelectItem>
+            {authorities.map((value) => (
+              <SelectItem key={value} value={value}>
+                {value}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        <Select value={sort} onValueChange={(value) => setSort(value as SortOrder)}>
+          <SelectTrigger size="sm" aria-label={t("sortLabel")} className="w-56">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="newest">{t("sortLabel")}: {t("sortNewest")}</SelectItem>
+            <SelectItem value="oldest">{t("sortOldest")}</SelectItem>
+            <SelectItem value="title">{t("sortTitle")}</SelectItem>
+          </SelectContent>
+        </Select>
+
+        <DocumentFilters
+          documents={regulationsQuery.data}
+          value={filters}
+          onChange={setFilters}
+        />
+      </div>
+
+      {visibleRegulations.length === 0 ? (
+        <EmptyState message={t("filterNoResults")} />
+      ) : null}
+
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        {visibleRegulations.map((regulation) => {
+        const summary = summaryByRegulation.get(regulation.document_id);
+        const escalatedAssigneeIds = summary?.escalated_assignee_ids ?? [];
+        const hasReview = (summary?.actions_total ?? 0) > 0;
+
+        return (
+          <Card
+            key={regulation.document_id}
+            className="relative flex flex-col transition-colors focus-within:ring-2 focus-within:ring-ring hover:border-foreground/30"
+          >
+            <CardHeader>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="secondary" className="font-mono text-[11px]">
+                  {regulation.document_id}
+                </Badge>
+                {!hasReview ? (
+                  <DocumentStatusBadge status={regulation.status} />
+                ) : null}
+                {canEdit ? (
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="relative z-10 ml-auto h-6 w-6 text-muted-foreground hover:text-destructive"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setDeleteConfirmId(regulation.document_id);
+                    }}
+                    disabled={deleteMutation.isPending}
+                  >
+                    <Trash2 className="size-4" aria-hidden />
+                    <span className="sr-only">{t("delete")}</span>
+                  </Button>
+                ) : null}
+                <ChevronRight
+                  className={cn("size-4 text-muted-foreground", !canEdit && "ml-auto")}
+                  aria-hidden
+                />
+              </div>
+              <CardTitle className="text-base leading-snug wrap-anywhere">
+                <Link
+                  href={`/regulations/${regulation.document_id}`}
+                  className="after:absolute after:inset-0 after:rounded-xl hover:underline focus:outline-none"
+                >
+                  {regulation.title}
+                </Link>
+              </CardTitle>
+            </CardHeader>
+
+            <CardContent className="flex flex-1 flex-col gap-4">
+              {/* Résumé court demandé par Francis (« I don't know what is about this
+                  document »). Libellé au-dessus du texte : sur une ligne avec « : », le
+                  résumé se coupait mal. */}
+              {regulation.summary ? (
+                <div className="space-y-0.5 text-xs text-muted-foreground">
+                  <p className="font-medium">{t("summaryLabel")}</p>
+                  <p className="line-clamp-3">{regulation.summary}</p>
+                </div>
+              ) : null}
+
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+                <div>
+                  <dt className="text-xs text-muted-foreground">{t("authority")}</dt>
+                  <dd>{regulation.authority_or_owner}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-muted-foreground">
+                    {common("effectiveDate")}
+                  </dt>
+                  <dd>{formatDateDDMMYYYY(regulation.published_at) ?? common("notAvailable")}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-muted-foreground">
+                    {t("createdDateLabel")}
+                  </dt>
+                  {/* `published_at` existe déjà au contrat et dans le corpus mock —
+                      réel dès que disponible, badge seulement s'il manque vraiment
+                      (mode backend réel aujourd'hui). Jamais réutiliser `uploaded_at`
+                      sous ce libellé : ce sont deux dates distinctes pour Francis. */}
+                    <dd>{formatLocalDate(regulation.created_at) ?? common("notAvailable")}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-muted-foreground">
+                    {t("lastUpdatedLabel")}
+                  </dt>
+                  {/* v1.10 — `updated_at` timestamp now available from backend */}
+                  <dd>{formatLocalDate(regulation.updated_at) ?? common("notAvailable")}</dd>
+                </div>
+              </dl>
+
+              {hasReview && summary ? (
+                <ReviewProgressBar counts={summary.by_human_status} />
+              ) : null}
+
+              {regulation.domain.length ? (
+                <div className="flex flex-wrap gap-1">
+                  {regulation.domain.map((domain) => (
+                    <Badge key={domain} variant="outline" className="text-[11px]">
+                      {domain}
+                    </Badge>
+                  ))}
+                </div>
+              ) : null}
+
+              {escalatedAssigneeIds.length ? (
+                <div className="space-y-1 rounded-md border border-dashed p-2">
+                  <p className="text-xs text-muted-foreground">
+                    {assigneeT("escalatedTo")}
+                  </p>
+                  <ul className="flex flex-wrap gap-1.5 text-xs">
+                    {escalatedAssigneeIds.map((userId) => (
+                      <li key={userId}>
+                        <Badge variant="outline" className="text-[11px]">
+                          <AssigneeName userId={userId} />
+                        </Badge>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              {/* `mt-auto` : collé en bas de la carte, donc aligné d'une carte à l'autre
+                  qu'il y ait une barre de progression ou non. */}
+              <div className="mt-auto space-y-3">
+                <div className="relative z-10 space-y-1.5">
+                  <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <UserRoundCheck className="size-3.5" aria-hidden />
+                    {assigneeT("label")}
+                  </p>
+                  {/* Modifiable directement sur la carte : l'assignation faite à
+                      l'upload n'est pas définitive. */}
+                  {canEdit ? (
+                    <AssigneeSelect
+                      value={regulation.assignee_id}
+                      disabled={assignMutation.isPending}
+                      onChange={(assigneeId) =>
+                        assignMutation.mutate({
+                          regulationId: regulation.document_id,
+                          assigneeId,
+                        })
+                      }
+                      className="w-full"
+                    />
+                  ) : (
+                    <p className="text-sm">
+                      <AssigneeName userId={regulation.assignee_id} />
+                    </p>
+                  )}
+                </div>
+                <p className="text-xs text-muted-foreground">{t("openCardHint")}</p>
+              </div>
+            </CardContent>
+          </Card>
+        );
+      })}
+      </div>
+
+      {/* Delete confirmation dialog */}
+      <Dialog open={!!deleteConfirmId} onOpenChange={(open) => !open && setDeleteConfirmId(null)}>
+        <DialogContent>
+          <DialogTitle>{t("deleteConfirmTitle")}</DialogTitle>
+          <DialogDescription>
+            {t("deleteConfirmMessage")}
+          </DialogDescription>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteConfirmId(null)}
+              disabled={deleteMutation.isPending}
+            >
+              {common("cancel")}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                if (deleteConfirmId) {
+                  deleteMutation.mutate(deleteConfirmId);
+                }
+              }}
+              disabled={deleteMutation.isPending}
+            >
+              {t("delete")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}

@@ -1,0 +1,89 @@
+"""Document-related models."""
+
+from datetime import datetime
+
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy.orm import relationship
+
+from app.db.base import Base
+from app.utils.ulid_utils import generate_ulid
+
+
+class Document(Base):
+    """Represents a regulatory or internal document."""
+
+    __tablename__ = "documents"
+
+    document_id = Column(String(26), primary_key=True, default=generate_ulid)
+    title = Column(String, nullable=False)
+    category = Column(String)  # EXTERNAL, INTERNAL, CONTROL
+    document_type = Column(String)  # e.g., REGULATORY_STANDARD, GUIDELINE, POLICY
+    origin_code = Column(String)
+    origin_name = Column(String)
+    domain = Column(String)  # e.g., AML/CFT, KYC
+    language = Column(String)  # EN, FR
+    summary = Column(Text, nullable=True)  # Document summary
+    current_version = Column(String)
+    current_file_path = Column(String)
+    data_classification = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    published_at = Column(DateTime, nullable=True)
+    assignee = Column(String, nullable=True)
+
+    # Relationships
+    versions = relationship("DocumentVersion", back_populates="document", cascade="all, delete-orphan")
+    chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
+    requirements = relationship("RegulatoryRequirement", back_populates="document", cascade="all, delete-orphan")
+
+
+class DocumentVersion(Base):
+    """Represents a version of a document."""
+
+    __tablename__ = "document_versions"
+
+    # "VER-{document_id}-{NN}": up to 33 characters with a ULID document id.
+    version_id = Column(String(64), primary_key=True, default=generate_ulid)
+    document_id = Column(String(26), ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False)
+    version_no = Column(String)
+    version_timestamp = Column(DateTime)
+    status = Column(String)  # ACTIVE, SUPERSEDED
+    file_path = Column(String)
+    sha256 = Column(String)
+    created_by = Column(String)
+    change_reason = Column(String)
+
+    # Indexes
+    __table_args__ = (
+        Index("idx_document_versions_document_id", "document_id"),
+    )
+
+    # Relationships
+    document = relationship("Document", back_populates="versions")
+    chunks = relationship("DocumentChunk", back_populates="version", cascade="all, delete-orphan")
+
+
+class DocumentChunk(Base):
+    """Represents a chunk/section of a document."""
+
+    __tablename__ = "document_chunks"
+
+    # "CHK-{document_id}-{NN}-{NNN}": up to 37 characters with a ULID document id.
+    chunk_id = Column(String(64), primary_key=True, default=generate_ulid)
+    document_id = Column(String(26), ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False)
+    version_id = Column(String(64), ForeignKey("document_versions.version_id", ondelete="CASCADE"), nullable=False)
+    chunk_no = Column(Integer)
+    section_title = Column(String)
+    content = Column(Text)
+    language = Column(String)
+    domain = Column(String)
+
+    # Indexes
+    __table_args__ = (
+        Index("idx_document_chunks_document_id", "document_id"),
+        Index("idx_document_chunks_version_id", "version_id"),
+    )
+
+    # Relationships
+    document = relationship("Document", back_populates="chunks")
+    version = relationship("DocumentVersion", back_populates="chunks")

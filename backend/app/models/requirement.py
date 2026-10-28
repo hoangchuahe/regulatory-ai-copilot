@@ -1,0 +1,39 @@
+"""Regulatory requirement models."""
+
+from datetime import datetime
+
+from sqlalchemy import Column, DateTime, ForeignKey, Index, String, Text
+from sqlalchemy.orm import relationship
+
+from app.db.base import Base
+from app.utils.ulid_utils import generate_ulid
+
+
+class RegulatoryRequirement(Base):
+    """Represents a regulatory requirement extracted from a document."""
+
+    __tablename__ = "regulatory_requirements"
+
+    requirement_id = Column(String(26), primary_key=True, default=generate_ulid)
+    source_document_id = Column(String(26), ForeignKey("documents.document_id", ondelete="CASCADE"), nullable=False)
+    title = Column(String)  # English title
+    title_lang_fr = Column(String, nullable=True)  # French title
+    domain = Column(String)  # e.g., AML/CFT, KYC
+    language = Column(String)  # EN, FR
+    requirement_text = Column(Text)  # English requirement text
+    requirement_text_lang_fr = Column(Text, nullable=True)  # French requirement text
+    risk_level = Column(String)  # LOW, MEDIUM, HIGH
+    source_reference = Column(String)  # e.g., Article 5, Section 2.1
+    status = Column(String)  # ACTIVE, SUPERSEDED, etc.
+    evidence = Column(Text, nullable=True)  # Evidence supporting this requirement
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Indexes
+    __table_args__ = (
+        Index("idx_regulatory_requirements_source_document_id", "source_document_id"),
+    )
+
+    # Relationships
+    document = relationship("Document", back_populates="requirements")
+    mappings = relationship("RequirementProcedureMap", back_populates="requirement", cascade="all, delete-orphan")

@@ -1,0 +1,74 @@
+"""Application configuration."""
+
+import logging
+import os
+
+from pydantic_settings import BaseSettings
+
+# Create logs directory if it doesn't exist
+try:
+    os.makedirs("logs", exist_ok=True)
+except Exception:
+    pass
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler("logs/app.log"),
+        logging.StreamHandler(),
+    ],
+)
+
+# Suppress verbose SQLAlchemy SQL query logging
+logging.getLogger("sqlalchemy.engine").setLevel(logging.ERROR)
+logging.getLogger("sqlalchemy.pool").setLevel(logging.ERROR)
+logging.getLogger("sqlalchemy").setLevel(logging.ERROR)
+
+
+DEFAULT_SECRET_KEY = "dev-secret-key-change-me"
+
+
+class Settings(BaseSettings):
+    """Application settings loaded from environment variables."""
+
+    # Database
+    database_url: str = ""
+
+    # App
+    environment: str = "development"
+    debug: bool = False  # True returns tracebacks to the client
+
+    # CORS
+    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:3001", "https://ia-bank-demo-one.vercel.app"]
+
+    # Auth (JWT)
+    secret_key: str = DEFAULT_SECRET_KEY  # override via .env — never use in production
+    algorithm: str = "HS256"
+    access_token_expire_minutes: int = 1440
+
+    # OpenRouter API (for pipeline ingestion)
+    openrouter_api_key: str = ""
+
+    # OpenRouter API key dedicated to the Compliance Copilot (chat)
+    chat_bot_key: str = ""
+
+    class Config:
+        env_file = ".env"
+        case_sensitive = False
+        extra = "ignore"  # Ignore extra fields from .env
+
+
+settings = Settings()
+
+if settings.secret_key in ("", DEFAULT_SECRET_KEY):
+    # The default is in the repository: anyone can sign a token for any user with it.
+    # Temporary (Hoang, 2026-10-02): warning only, so a deployment without SECRET_KEY still
+    # starts. Once every instance has its own key, refuse to start outside development:
+    #     if settings.environment != "development":
+    #         raise RuntimeError("SECRET_KEY must be set outside development")
+    settings.secret_key = DEFAULT_SECRET_KEY  # an empty SECRET_KEY= line is not a key
+    logging.getLogger(__name__).warning(
+        "SECRET_KEY is the public default: set it in .env before sharing this instance"
+    )

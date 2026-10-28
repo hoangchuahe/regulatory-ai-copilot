@@ -1,0 +1,721 @@
+/**
+ * Implémentations « backend réel » des ressources que Thư couvre aujourd'hui.
+ *
+ * Chaque fonction renvoie des types du **contrat** : l'appelant (`src/lib/api/*.ts`)
+ * choisit la source, les écrans ne savent pas laquelle a répondu.
+ *
+ * Couvert ici : authentification (`signin` et `signup`, v1.4), documents (régulations et
+ * procédures), exigences,
+ * constats (`GET /api/mappings/*`, ajouté par Thư le 2026-09-07 — voir
+ * `finding-adapt.ts` pour les limites assumées de cette traduction), liste des
+ * utilisateurs (`GET /api/users`, 2026-09-07 ; `PUT /api/users/:id/role`, 2026-09-09 soir)
+ * et validation humaine (`PUT /api/mappings/:id/human-status`+`/assignee`,
+ * 2026-09-07 après-midi).
+ * Import de documents (`POST /api/documents/regulation-ingest`, `/api/procedures/ingest`),
+ * versions d'un document, historique des décisions (`GET /api/mappings/history`).
+ * Non couvert par le backend et donc absent de ce fichier — cela reste sur MSW :
+ * tableau de bord global.
+ */
+import { z } from "zod";
+
+import type {
+  AuditHistoryEntry,
+  DocumentDetail,
+  DocumentMeta,
+  Finding,
+  Language,
+  LoginBody,
+  LoginResponse,
+  Requirement,
+  SignupBody,
+  UpdateUserRoleBody,
+  User,
+  ValidateFindingBody,
+} from "@/types/api";
+
+import { ApiError } from "../client";
+
+import {
+  adaptDocument,
+  adaptDocumentDetail,
+  adaptExtractedText,
+  adaptRequirement,
+  adaptUser,
+} from "./adapt";
+import { BackendGapError, backendFetch } from "./client";
+import { deriveCurrentVersionId } from "./current-version-id";
+import {
+  adaptAssessment,
+  adaptHumanStatus,
+  adaptHumanStatusToBackend,
+  assembleMappedFinding,
+  assembleUnmappedFinding,
+} from "./finding-adapt";
+import {
+  backendAnalyzeMappingsSchema,
+  backendAssigneeHistorySchema,
+  backendCreateExtractionJobsSchema,
+  backendDeleteDocumentSchema,
+  backendDocumentContentSchema,
+  backendDocumentListSchema,
+  backendDocumentSchema,
+  backendDocumentVersionSchema,
+  backendMappingDetailSchema,
+  backendMappingHistorySchema,
+  backendMappingSchema,
+  backendPortfolioSchema,
+  backendRequirementListSchema,
+  backendRequirementSchema,
+  backendRequirementWithProceduresSchema,
+  backendRequirementsToProceduresSchema,
+  backendTokenSchema,
+  backendUserListSchema,
+  backendUserSchema,
+  type BackendDocumentVersion,
+  type BackendMappingDetail,
+  type BackendProcedureMinimal,
+} from "./schemas";
+
+/** Le backend plafonne `limit` à 200 : au-delà, on enchaîne les pages jusqu'à `total`. */
+const PAGE_LIMIT = 200;
+
+async function fetchAllPages<TSchema extends z.ZodType<{ total: number; items: unknown[] }>>(
+  path: string,
+  schema: TSchema,
+  searchParams: Record<string, string | string[] | undefined> = {},
+): Promise<z.infer<TSchema>["items"]> {
+  const items: z.infer<TSchema>["items"] = [];
+  for (;;) {
+    const page = await backendFetch(path, schema, {
+      searchParams: { ...searchParams, limit: String(PAGE_LIMIT), offset: String(items.length) },
+    });
+    items.push(...page.items);
+    // Page vide : garde-fou si `total` est faux, pour ne jamais boucler.
+    if (items.length >= page.total || page.items.length === 0) return items;
+  }
+}
+
+/** Identifiants répétés en query string : par lots, pour garder l'URL sous ~4 Ko. */
+const ID_BATCH_SIZE = 100;
+
+function inBatches<T>(ids: readonly T[]): T[][] {
+  const batches: T[][] = [];
+  for (let start = 0; start < ids.length; start += ID_BATCH_SIZE) {
+    batches.push(ids.slice(start, start + ID_BATCH_SIZE));
+  }
+  return batches;
+}
+
+// --- Authentification -------------------------------------------------------
+
+/**
+ * `POST /api/auth/signin` — le backend fait autorité sur l'authentification (vrai JWT,
+ * là où le frontend simulait). Le nom de la route diffère du contrat (`login`), d'où
+ * la traduction ici plutôt que dans les écrans.
+ */
+export async function signIn(body: LoginBody): Promise<LoginResponse> {
+  const response = await backendFetch("/api/auth/signin", backendTokenSchema, {
+    method: "POST",
+    body: { email: body.email, password: body.password },
+    skipAuth: true,
+  });
+
+  return { user: adaptUser(response.user), token: response.access_token };
+}
+
+/**
+ * `POST /api/auth/signup` (v1.4) — crée un compte et renvoie un JWT, comme `signin`.
+ * Le backend fixe `role` à `COMPLIANCE_OFFICER` pour tout nouveau compte : rien dans le
+ * corps de la requête ne permet de le choisir, et aucune route ne permet de le changer
+ * ensuite (voir `docs/backend-integration.md`).
+ */
+export async function signUp(body: SignupBody): Promise<LoginResponse> {
+  const response = await backendFetch("/api/auth/signup", backendTokenSchema, {
+    method: "POST",
+    body: { email: body.email, password: body.password, full_name: body.full_name },
+    skipAuth: true,
+  });
+
+  return { user: adaptUser(response.user), token: response.access_token };
+}
+
+/** `GET /api/auth/me` — profil à jour (rôle changé par un admin depuis la connexion). */
+export async function fetchMe(): Promise<User> {
+  return adaptUser(await backendFetch("/api/auth/me", backendUserSchema));
+}
+
+// --- Documents --------------------------------------------------------------
+
+async function listDocuments(category: "EXTERNAL" | "INTERNAL") {
+  const items = await fetchAllPages("/api/documents", backendDocumentListSchema, { category });
+  return items.map(adaptDocument);
+}
+
+/** Les régulations sont les documents `EXTERNAL` du backend. */
+export function fetchRegulations(): Promise<DocumentMeta[]> {
+  return listDocuments("EXTERNAL");
+}
+
+/** Les procédures internes sont les documents `INTERNAL`. */
+export function fetchProcedures(): Promise<DocumentMeta[]> {
+  return listDocuments("INTERNAL");
+}
+
+/**
+ * Détail d'un document + son texte source.
+ *
+ * Le texte demande un second appel, et l'identifiant de version doit être reconstruit
+ * (voir `current-version-id.ts`). Si le backend ne connaît pas la version déduite, on
+ * lève une erreur explicite : mieux vaut un message clair qu'un onglet « Texte source »
+ * silencieusement vide.
+ */
+/**
+ * `PUT /api/documents/:id/assignee` (Thư, 2026-09-15, commit `4ea5611`) — remplace le
+ * correctif local `regulation-assignee-overrides.ts` (le backend n'avait avant aucun
+ * champ `assignee` sur un document, donc l'assignation d'une régulation réelle ne
+ * pouvait pas être persistée côté serveur). `assignee` accepte un `user_id` ou un
+ * e-mail d'après `backend/API.md` — l'app envoie toujours le `user_id` déjà utilisé
+ * partout ailleurs (`AssigneeSelect`).
+ */
+export async function updateDocumentAssignee(
+  id: string,
+  assignee: string | null,
+): Promise<DocumentMeta> {
+  const response = await backendFetch(
+    `/api/documents/${encodeURIComponent(id)}/assignee`,
+    backendDocumentSchema,
+    { method: "PUT", body: { assignee } },
+  );
+  return adaptDocument(response);
+}
+
+/** Corps commun aux deux routes d'ingestion (`backend/API.md` § 3). */
+export type IngestDocumentBody = {
+  text: string;
+  title: string;
+  domain: string;
+  language: Language;
+  summary?: string;
+  created_by: string;
+  published_at?: string;
+};
+
+/**
+ * `POST /api/documents/regulation-ingest` ou `POST /api/procedures/ingest`. Le backend
+ * pose `assignee = created_by` : une autre personne en charge demande un second appel.
+ * Si celui-ci échoue, le document est déjà créé — on ne le fait pas passer pour un
+ * import raté (l'assignation reste modifiable sur la carte).
+ */
+export async function ingestDocument(
+  path: "/api/documents/regulation-ingest" | "/api/procedures/ingest",
+  body: IngestDocumentBody,
+  assigneeId?: string,
+): Promise<DocumentMeta> {
+  const created = adaptDocument(
+    await backendFetch(path, backendDocumentSchema, { method: "POST", body }),
+  );
+  if (!assigneeId || assigneeId === body.created_by) return created;
+
+  return updateDocumentAssignee(created.document_id, assigneeId).catch((error) => {
+    console.error(`Assignation de ${created.document_id} non enregistrée`, error);
+    return created;
+  });
+}
+
+export async function fetchDocumentDetail(id: string): Promise<DocumentDetail> {
+  const document = await backendFetch(
+    `/api/documents/${encodeURIComponent(id)}`,
+    backendDocumentSchema,
+  );
+
+  const versionId = deriveCurrentVersionId(id, document.current_version);
+  if (!versionId) {
+    throw new BackendGapError(
+      `Version courante inconnue pour ${id} : le backend ne renvoie pas d'identifiant de version.`,
+    );
+  }
+
+  try {
+    const content = await backendFetch(
+      `/api/documents/content/${encodeURIComponent(versionId)}`,
+      backendDocumentContentSchema,
+    );
+    return adaptDocumentDetail(document, content);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      throw new BackendGapError(
+        `Contenu introuvable pour ${id} (version déduite : ${versionId}). ` +
+          "La convention d'identifiant de version a changé côté backend.",
+      );
+    }
+    throw error;
+  }
+}
+
+/** `GET /api/documents/{id}/versions` (2026-09-21) — métadonnées, plus ancienne d'abord. */
+export function fetchDocumentVersions(documentId: string): Promise<BackendDocumentVersion[]> {
+  return backendFetch(
+    `/api/documents/${encodeURIComponent(documentId)}/versions`,
+    z.array(backendDocumentVersionSchema),
+  );
+}
+
+/** Texte d'une version précise (`GET /api/documents/content/{version_id}`). */
+export async function fetchDocumentVersionText(versionId: string): Promise<string> {
+  const content = await backendFetch(
+    `/api/documents/content/${encodeURIComponent(versionId)}`,
+    backendDocumentContentSchema,
+  );
+  return adaptExtractedText(content);
+}
+
+// --- Exigences --------------------------------------------------------------
+
+/**
+ * `GET /api/requirements/by-documents` — le backend sait déjà filtrer par `domain`,
+ * `risk_level`, `language` et `status`. On lui passe le filtre plutôt que de tout
+ * charger pour filtrer côté client.
+ */
+export async function fetchRequirements(
+  documentIds: string | readonly string[],
+  filters: { domain?: string } = {},
+): Promise<Requirement[]> {
+  // Plusieurs documents en une requête (tableau de bord) plutôt qu'une par document.
+  const pages = await Promise.all(
+    inBatches([documentIds].flat()).map((document_ids) =>
+      fetchAllPages("/api/requirements/by-documents", backendRequirementListSchema, {
+        document_ids,
+        domain: filters.domain,
+      }),
+    ),
+  );
+
+  return pages.flat().map(adaptRequirement);
+}
+
+// --- Constats (couples exigence × procédure) --------------------------------
+
+/**
+ * Constats d'une régulation, à partir de `GET /api/mappings/requirements-to-procedures`
+ * (ajouté par Thư le 2026-09-07).
+ *
+ * Aucun texte de procédure n'est chargé : la liste n'affiche que le nom de la procédure,
+ * déjà présent dans la réponse (`procedure.name` → `Finding.procedure_title`). Le charger
+ * coûtait deux requêtes par procédure à chaque (re)chargement de l'onglet « Exigences ».
+ * Les preuves détaillées sont celles de la page d'un constat (`fetchMappingDetail`).
+ */
+export async function fetchFindings(regulationId: string): Promise<Finding[]> {
+  return fetchFindingsOfRequirements(await fetchRequirements(regulationId));
+}
+
+/**
+ * Constats d'exigences déjà chargées, d'une ou de plusieurs régulations : `dashboard.ts`
+ * construit ainsi tout le portefeuille en une requête par lot de 100 exigences, au lieu
+ * d'une par régulation.
+ */
+export async function fetchFindingsOfRequirements(
+  requirements: readonly Requirement[],
+): Promise<Finding[]> {
+  if (requirements.length === 0) return [];
+
+  const nestedBatches = await Promise.all(
+    inBatches(requirements.map((r) => r.requirement_id)).map((requirement_ids) =>
+      backendFetch(
+        "/api/mappings/requirements-to-procedures",
+        backendRequirementsToProceduresSchema,
+        { searchParams: { requirement_ids } },
+      ),
+    ),
+  );
+  const nested = nestedBatches.flatMap((batch) => batch.data);
+
+  // Une requête de plus seulement s'il existe au moins une escalade.
+  // ponytail: tous les identifiants dans une seule URL — par lots (`inBatches`) si un
+  // portefeuille dépasse une centaine d'exigences escaladées.
+  const escalatedRequirementIds = nested
+    .filter((item) =>
+      item.procedures.some(
+        ({ mapping }) => adaptHumanStatus(mapping.human_status) === "ESCALATED",
+      ),
+    )
+    .map((item) => item.requirement.requirement_id);
+  const escalationAssignees = escalatedRequirementIds.length
+    ? await fetchEscalationAssignees({ requirement_ids: escalatedRequirementIds })
+    : new Map<string, string>();
+
+  return assembleFindings(requirements, nested, escalationAssignees);
+}
+
+/**
+ * Tout le portefeuille en une requête : `GET /api/dashboard/portfolio` (2026-10-07). Mêmes
+ * éléments que la liste des régulations, leurs exigences et leurs constats chargés un à un,
+ * assignés des escalades compris.
+ */
+export async function fetchPortfolio(): Promise<{
+  regulations: DocumentMeta[];
+  requirements: Requirement[];
+  findings: Finding[];
+}> {
+  const portfolio = await backendFetch("/api/dashboard/portfolio", backendPortfolioSchema);
+  const requirements = portfolio.requirements.map(adaptRequirement);
+  return {
+    regulations: portfolio.documents.map(adaptDocument),
+    requirements,
+    findings: assembleFindings(
+      requirements,
+      portfolio.mappings,
+      new Map(Object.entries(portfolio.escalation_assignees)),
+    ),
+  };
+}
+
+/** Un constat par couple exigence × procédure, ou un seul pour une exigence sans procédure. */
+function assembleFindings(
+  requirements: readonly Requirement[],
+  nested: readonly z.infer<typeof backendRequirementWithProceduresSchema>[],
+  escalationAssignees: ReadonlyMap<string, string>,
+): Finding[] {
+  const requirementsById = new Map(requirements.map((r) => [r.requirement_id, r]));
+  const findings: Finding[] = [];
+
+  for (const item of nested) {
+    const requirement = requirementsById.get(item.requirement.requirement_id);
+    if (!requirement) {
+      // Ne devrait pas arriver : on a demandé exactement ces identifiants. Une ligne
+      // ignorée plutôt qu'un onglet cassé si le backend renvoie un id inattendu.
+      console.error(
+        `Exigence ${item.requirement.requirement_id} absente de la réponse attendue`,
+      );
+      continue;
+    }
+
+    if (item.procedures.length === 0) {
+      findings.push(
+        assembleUnmappedFinding({
+          requirement,
+          riskLevel: item.requirement.risk_level,
+          // Titre de `regulatory_evidence` : aucun écran ne l'affiche depuis cette
+          // liste, l'identifiant évite un appel de plus.
+          regulationTitle: requirement.source_document_id,
+        }),
+      );
+      continue;
+    }
+
+    for (const { procedure, mapping } of item.procedures) {
+      const typedProcedure: BackendProcedureMinimal = procedure;
+      findings.push(
+        assembleMappedFinding({
+          mapping,
+          requirement,
+          riskLevel: item.requirement.risk_level,
+          regulationTitle: requirement.source_document_id,
+          procedure: typedProcedure,
+          escalationAssignee: escalationAssignees.get(mapping.mapping_id),
+        }),
+      );
+    }
+  }
+
+  return findings;
+}
+
+/**
+ * Personne à qui chaque constat escaladé est confié, par `mapping_id`. `MappingRead` n'a pas
+ * de champ `assignee` : l'escalade n'est écrite que dans `mapping_history` — on prend la
+ * ligne `ESCALATE` la plus récente (`GET /api/mappings/history` trie du plus récent au plus
+ * ancien). Un échec ne casse pas l'écran : le constat s'affiche simplement « non assigné ».
+ */
+export async function fetchEscalationAssignees(
+  filter: { requirement_ids: string[] } | { mapping_id: string },
+): Promise<Map<string, string>> {
+  const assignees = new Map<string, string>();
+  try {
+    const rows = await backendFetch(
+      "/api/mappings/history",
+      z.array(backendMappingHistorySchema),
+      { searchParams: filter },
+    );
+    for (const row of rows) {
+      if (row.to_status === "ESCALATE" && row.assignee && !assignees.has(row.mapping_id)) {
+        assignees.set(row.mapping_id, row.assignee);
+      }
+    }
+  } catch (error) {
+    console.error("Assignés des escalades indisponibles", error);
+  }
+  return assignees;
+}
+
+// --- Utilisateurs -------------------------------------------------------------
+
+/**
+ * `GET /api/users` (ajouté par Thư le 2026-09-07) — répond à la question ouverte n°6
+ * de `docs/backend-integration.md`. Sert les mêmes sélecteurs d'assignation que le
+ * mode mock (`AssigneeSelect`, `useUsers`) : les écrans ne savent pas laquelle a
+ * répondu.
+ */
+export async function fetchUsers(): Promise<User[]> {
+  const items = await fetchAllPages("/api/users", backendUserListSchema);
+  return items.map(adaptUser);
+}
+
+/**
+ * `PUT /api/users/:id/role` (v1.5, commit `fabd0cf` — « Create API to update role of
+ * user ») : répond au point resté ouvert en v1.4 (aucune route ne permettait de
+ * choisir ou changer `User.role`). **Limite assumée** : la route n'a aucun contrôle
+ * d'autorisation — n'importe quel compte authentifié peut changer le rôle de
+ * n'importe quel autre, voir `docs/backend-integration.md`.
+ */
+export async function updateUserRole(
+  userId: string,
+  body: UpdateUserRoleBody,
+): Promise<User> {
+  const response = await backendFetch(
+    `/api/users/${encodeURIComponent(userId)}/role`,
+    backendUserSchema,
+    { method: "PUT", body: { role: body.role } },
+  );
+  return adaptUser(response);
+}
+
+/**
+ * `GET /api/requirements/{id}` — seule source du texte de l'exigence et de ses variantes FR :
+ * le bloc `requirement` de `GET /api/mappings/{id}` n'a ni `title_lang_fr` ni `requirement_text`.
+ */
+export async function fetchRequirement(requirementId: string) {
+  return backendFetch(
+    `/api/requirements/${encodeURIComponent(requirementId)}`,
+    backendRequirementSchema,
+  );
+}
+
+/**
+ * Get complete details of a specific mapping with nested requirement and procedure data.
+ * Endpoint: `GET /api/mappings/{mapping_id}`
+ */
+export async function fetchMappingDetail(
+  mappingId: string,
+): Promise<BackendMappingDetail> {
+  return backendFetch(
+    `/api/mappings/${encodeURIComponent(mappingId)}`,
+    backendMappingDetailSchema,
+  );
+}
+
+// --- Validation humaine ---------------------------------------------------------
+
+/**
+ * Persiste une décision humaine via `PUT /api/mappings/:id/human-status`. Voir
+ * `finding-adapt.ts::adaptHumanStatusToBackend` pour la traduction d'énumération
+ * (verbe court côté backend, participe passé côté contrat).
+ *
+ * Limites assumées, documentées dans `docs/known-limitations.md` :
+ * - le backend ne connaît ni `actor_id` ni `reviewer_comment` : la décision est
+ *   persistée, mais pas journalisée — l'onglet Historique reste sur MSW ;
+ * - une exigence sans procédure associée (`assembleUnmappedFinding`, préfixe
+ *   `NO-MAPPING-`) n'a pas de ligne `RequirementProcedureMap` côté backend : il n'y a
+ *   rien à persister, l'appel échoue explicitement plutôt que de faire semblant ;
+ * - `ACCEPTED` : le backend applique les modifications suggérées à la procédure et en
+ *   crée une nouvelle version (2026-09-21) ;
+ * - `ESCALATED` : `assignee` obligatoire, enregistré par le backend sur le document de la
+ *   procédure (`documents.assignee`), pas sur le constat — il n'est donc pas relu ici.
+ */
+export async function validateMapping(
+  mappingId: string,
+  body: ValidateFindingBody,
+): Promise<Finding> {
+  if (mappingId.startsWith("NO-MAPPING-")) {
+    throw new BackendGapError(
+      `Aucun mapping backend pour ${mappingId} : cette exigence n'a aucune procédure ` +
+        "associée, il n'y a donc rien à persister côté serveur.",
+    );
+  }
+
+  const latest = await backendFetch(
+    `/api/mappings/${encodeURIComponent(mappingId)}/human-status`,
+    backendMappingSchema,
+    {
+      method: "PUT",
+      body: {
+        human_status: adaptHumanStatusToBackend(body.human_status),
+        assignee: body.human_status === "ESCALATED" ? body.assignee_id : undefined,
+        comment: body.custom_action,
+      },
+    },
+  );
+
+  // `priority` vit sur l'exigence (`risk_level`), pas sur le mapping : la valeur
+  // exacte revient au prochain chargement de la liste, invalidé juste après par
+  // l'appelant (`finding-action-row.tsx`) — ce retour ne sert qu'au toast immédiat.
+  return {
+    finding_id: latest.mapping_id,
+    requirement_id: latest.requirement_id,
+    procedure_id: latest.procedure_id,
+    assessment: adaptAssessment(latest.assessment),
+    regulatory_evidence: [],
+    internal_evidence: [],
+    explanation: latest.explanation ?? "",
+    missing_or_ambiguous_elements: [],
+    recommended_action: latest.recommended_action ?? "",
+    custom_action: body.custom_action,
+    priority: "MEDIUM",
+    confidence_or_evidence_strength: latest.confidence ?? undefined,
+    human_status: adaptHumanStatus(latest.human_status),
+    assignee_id: body.assignee_id,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+/**
+ * Extract regulatory requirements from a document using LLM analysis.
+ * Calls backend endpoint: POST /api/requirements/extract
+ */
+export async function createExtractionJobsFromBackend(documentId: string) {
+  return backendFetch(
+    "/api/requirements/extract",
+    backendCreateExtractionJobsSchema,
+    {
+      method: "POST",
+      body: { document_id: documentId },
+    },
+  );
+}
+
+/**
+ * Process a single extraction job.
+ * Endpoint: POST /api/requirements/jobs/{job_id}/process
+ */
+export async function processExtractionJobFromBackend(jobId: string) {
+  return backendFetch(
+    `/api/requirements/jobs/${encodeURIComponent(jobId)}/process`,
+    z.object({
+      job_id: z.string(),
+      status: z.enum(["COMPLETED", "FAILED"]),
+      extracted_requirement_ids: z.array(z.string()),
+      error_message: z.string().nullable(),
+      chunks_processed: z.number(),
+    }),
+    {
+      method: "POST",
+    },
+  );
+}
+
+/** `POST /api/mappings/analyze` — analyse d'impact par LLM des exigences sur les procédures. */
+export function analyzeMappingsInBackend(requirementIds: string[]) {
+  return backendFetch("/api/mappings/analyze", backendAnalyzeMappingsSchema, {
+    method: "POST",
+    body: { requirement_ids: requirementIds },
+  });
+}
+
+/** `DELETE /api/documents/{id}` — suppression en cascade (versions, exigences, correspondances). */
+export function deleteDocumentFromBackend(documentId: string) {
+  return backendFetch(
+    `/api/documents/${encodeURIComponent(documentId)}`,
+    backendDeleteDocumentSchema,
+    { method: "DELETE" },
+  );
+}
+
+/**
+ * Historique d'une régulation : décisions sur les couples de ses exigences
+ * (`GET /api/mappings/history`, table `mapping_history`, 2026-09-21) + changements de
+ * personne en charge (`GET /api/documents/{id}/history`, `audit_history`), plus récent
+ * en premier. Les remises à « En attente » sont écartées : l'onglet ne montre que des
+ * décisions.
+ */
+export async function fetchMappingHistory(regulationId: string): Promise<AuditHistoryEntry[]> {
+  const [decisions, assigneeChanges] = await Promise.all([
+    fetchDecisionHistory(regulationId),
+    fetchAssigneeHistory(regulationId),
+  ]);
+  return [...decisions, ...assigneeChanges].sort((a, b) =>
+    b.created_at.localeCompare(a.created_at),
+  );
+}
+
+async function fetchAssigneeHistory(documentId: string): Promise<AuditHistoryEntry[]> {
+  const rows = await backendFetch(
+    `/api/documents/${encodeURIComponent(documentId)}/history`,
+    z.array(backendAssigneeHistorySchema),
+  );
+  return rows.map((row) => ({
+    entry_id: row.audit_id,
+    regulation_id: documentId,
+    requirement_id: "",
+    finding_id: "",
+    procedure_id: null,
+    action: "ASSIGNEE_CHANGED",
+    actor_id: row.actor ?? "",
+    created_at: row.event_timestamp ?? "",
+    assignee_id: row.to_assignee ?? undefined,
+    previous_assignee_id: row.from_assignee ?? undefined,
+  }));
+}
+
+async function fetchDecisionHistory(regulationId: string): Promise<AuditHistoryEntry[]> {
+  const requirements = await fetchRequirements(regulationId);
+  if (requirements.length === 0) return [];
+
+  const rowBatches = await Promise.all(
+    inBatches(requirements.map((r) => r.requirement_id)).map((requirement_ids) =>
+      backendFetch("/api/mappings/history", z.array(backendMappingHistorySchema), {
+        searchParams: { requirement_ids },
+      }),
+    ),
+  );
+
+  return rowBatches.flat().flatMap((row): AuditHistoryEntry[] => {
+    const action = adaptHumanStatus(row.to_status);
+    if (action === "PENDING") return [];
+    return [
+      {
+        entry_id: row.history_id,
+        regulation_id: regulationId,
+        requirement_id: row.requirement_id,
+        finding_id: row.mapping_id,
+        procedure_id: row.procedure_id ?? null,
+        action,
+        actor_id: row.actor ?? "",
+        custom_action: row.comment ?? undefined,
+        created_at: row.created_at ?? "",
+        previous_status: row.from_status ? adaptHumanStatus(row.from_status) : undefined,
+        assignee_id: row.assignee ?? undefined,
+        new_version_id: row.new_version_id ?? undefined,
+      },
+    ];
+  });
+}
+
+/**
+ * Historique des décisions pour un mapping spécifique — requête par mapping_id.
+ * Filtre les remises à « En attente » : ne montre que les décisions réelles.
+ */
+export async function fetchMappingHistoryById(mappingId: string): Promise<AuditHistoryEntry[]> {
+  const rows = await backendFetch("/api/mappings/history", z.array(backendMappingHistorySchema), {
+    searchParams: { mapping_id: mappingId },
+  });
+
+  return rows.flatMap((row): AuditHistoryEntry[] => {
+    const action = adaptHumanStatus(row.to_status);
+    if (action === "PENDING") return [];
+    return [
+      {
+        entry_id: row.history_id,
+        regulation_id: "",
+        requirement_id: row.requirement_id,
+        finding_id: row.mapping_id,
+        procedure_id: row.procedure_id ?? null,
+        action,
+        actor_id: row.actor ?? "",
+        custom_action: row.comment ?? undefined,
+        created_at: row.created_at ?? "",
+        previous_status: row.from_status ? adaptHumanStatus(row.from_status) : undefined,
+        assignee_id: row.assignee ?? undefined,
+        new_version_id: row.new_version_id ?? undefined,
+      },
+    ];
+  });
+}

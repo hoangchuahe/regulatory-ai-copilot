@@ -1,0 +1,215 @@
+import { z } from "zod";
+
+import {
+  documentDetailSchema,
+  documentMetaSchema,
+  requirementSchema,
+} from "@/types/api";
+
+import { isBackendLive } from "./backend/config";
+import * as backend from "./backend/resources";
+import { apiFetch } from "./client";
+
+/**
+ * Préfixe des identifiants générés par `POST /api/regulations` (toujours simulé par
+ * MSW, aucune route réelle — `docs/api-requests.md` #2/#8/#9). Sert à reconnaître un
+ * document créé côté mock même en mode backend réel : sans ça, `fetchRegulation` sur
+ * l'identifiant fraîchement créé interrogeait le vrai backend (qui ne le connaît pas)
+ * et renvoyait « Resource not found » juste après l'upload.
+ */
+export const MOCK_UPLOAD_ID_PREFIX = "REG-UP-";
+
+/**
+ * Chaque fonction choisit sa source : backend réel quand il couvre l'endpoint et que
+ * `NEXT_PUBLIC_API_BASE_URL` est renseigné, MSW sinon. Voir `./backend/config.ts`.
+ */
+export function fetchRegulations() {
+  if (isBackendLive) return backend.fetchRegulations();
+  return apiFetch("/api/regulations", z.array(documentMetaSchema));
+}
+
+export function fetchRegulation(id: string) {
+  // Toujours créé par MSW (voir `MOCK_UPLOAD_ID_PREFIX`) : le backend réel ne le
+  // connaîtra jamais, même quand il est branché.
+  if (isBackendLive && !id.startsWith(MOCK_UPLOAD_ID_PREFIX)) {
+    return backend.fetchDocumentDetail(id);
+  }
+  return apiFetch(`/api/regulations/${id}`, documentDetailSchema);
+}
+
+/** `domain` est appliqué côté serveur en mode réel, côté client en mode mock. */
+export function fetchRegulationRequirements(
+  id: string,
+  filters: { domain?: string } = {},
+) {
+  if (isBackendLive) return backend.fetchRequirements(id, filters);
+
+  return apiFetch(
+    `/api/regulations/${id}/requirements`,
+    z.array(requirementSchema),
+  ).then((requirements) =>
+    filters.domain
+      ? requirements.filter((requirement) =>
+          requirement.domain.includes(filters.domain as string),
+        )
+      : requirements,
+  );
+}
+
+/**
+ * `PUT /api/documents/:id/assignee` (Thư, 2026-09-15, commit `4ea5611`) en mode
+ * backend réel — remplace l'ancien correctif local `regulation-assignee-overrides.ts`
+ * (supprimé le même jour : le backend n'avait avant aucun champ `assignee` sur un
+ * document, donc rien à y persister). En mode mock, `PATCH /api/regulations/:id`
+ * fonctionne tel quel (le corpus MSW connaît déjà la régulation).
+ */
+export function updateRegulationAssignee(id: string, assigneeId: string) {
+  if (isBackendLive) return backend.updateDocumentAssignee(id, assigneeId);
+  return apiFetch(`/api/regulations/${id}`, documentMetaSchema, {
+    method: "PATCH",
+    body: { assignee_id: assigneeId },
+  });
+}
+
+export function analyzeRegulation(id: string) {
+  return apiFetch(
+    `/api/regulations/${id}/analyze`,
+    z.object({ status: z.literal("ANALYZING") }),
+    { method: "POST" },
+  );
+}
+
+/**
+ * Extract regulatory requirements from a document using LLM analysis.
+ * Returns async extraction jobs (new job-based workflow).
+ *
+ * Endpoint: POST /api/requirements/extract
+ * Uses backend when available, falls back to MSW mock otherwise.
+ */
+export function extractRequirements(documentId: string) {
+  if (isBackendLive) return backend.createExtractionJobsFromBackend(documentId);
+
+  return apiFetch(
+    "/api/requirements/extract",
+    z
+      .object({
+        document_id: z.string(),
+        document_version_id: z.string(),
+        total_jobs_created: z.number(),
+        jobs: z.array(
+          z.object({
+            job_id: z.string(),
+            document_id: z.string(),
+            document_version_id: z.string(),
+            chunk_no: z.number(),
+            status: z.enum(["PENDING", "COMPLETED", "FAILED"]),
+            extracted_requirement_ids: z.array(z.string()).nullable(),
+            error_message: z.string().nullable(),
+            created_at: z.string(),
+            updated_at: z.string(),
+          })
+        ),
+      })
+      .passthrough(),
+    {
+      method: "POST",
+      body: { document_id: documentId },
+    },
+  );
+}
+
+/**
+ * Process a single extraction job.
+ * Extracts requirements from a chunk via LLM and persists them.
+ *
+ * Endpoint: POST /api/requirements/jobs/{job_id}/process
+ */
+export function processExtractionJob(jobId: string) {
+  if (isBackendLive) return backend.processExtractionJobFromBackend(jobId);
+
+  return apiFetch(
+    `/api/requirements/jobs/${encodeURIComponent(jobId)}/process`,
+    z.object({
+      job_id: z.string(),
+      status: z.enum(["COMPLETED", "FAILED"]),
+      extracted_requirement_ids: z.array(z.string()),
+      error_message: z.string().nullable(),
+      chunks_processed: z.number(),
+    }),
+    {
+      method: "POST",
+    },
+  );
+}
+
+/**
+ * Traite des jobs d'extraction en parallèle et renvoie les identifiants de ceux qui ont
+ * échoué — appel rejeté ou réponse `FAILED`. Le backend accepte de relancer un job
+ * `FAILED` qui n'a rien extrait (`backend/API.md`, `POST .../jobs/{job_id}/process`).
+ */
+export async function processExtractionJobs(
+  jobIds: readonly string[],
+  onJobSettled?: () => void,
+): Promise<string[]> {
+  const succeeded = await Promise.all(
+    jobIds.map((jobId) =>
+      processExtractionJob(jobId)
+        .then((result) => result.status === "COMPLETED")
+        .catch((error: unknown) => {
+          console.error(`Extraction job ${jobId} failed`, error);
+          return false;
+        })
+        .finally(onJobSettled),
+    ),
+  );
+  return jobIds.filter((_, index) => !succeeded[index]);
+}
+
+/**
+ * Analyze impact of requirements on internal procedures and generate mappings.
+ * Takes a list of requirement IDs and uses LLM to assess impact on each procedure.
+ *
+ * Endpoint: POST /api/mappings/analyze
+ */
+export function analyzeMappings(requirementIds: string[]) {
+  if (isBackendLive) return backend.analyzeMappingsInBackend(requirementIds);
+
+  return apiFetch(
+    "/api/mappings/analyze",
+    z.array(
+      z.object({
+        requirement_id: z.string(),
+        mappings_created: z.number(),
+        mapping_ids: z.array(z.string()),
+        warnings: z.array(z.string()),
+      }),
+    ),
+    {
+      method: "POST",
+      body: { requirement_ids: requirementIds },
+    },
+  );
+}
+
+/**
+ * Delete a document and all linked data (cascading deletion).
+ * Endpoint: DELETE /api/documents/{document_id}
+ */
+export function deleteDocument(documentId: string) {
+  if (isBackendLive) return backend.deleteDocumentFromBackend(documentId);
+
+  return apiFetch(
+    `/api/documents/${encodeURIComponent(documentId)}`,
+    z.object({
+      document_id: z.string(),
+      message: z.string(),
+      deleted_counts: z.object({
+        document_versions: z.number(),
+        document_chunks: z.number(),
+        requirements: z.number(),
+        requirement_mappings: z.number(),
+      }),
+    }),
+    { method: "DELETE" },
+  );
+}

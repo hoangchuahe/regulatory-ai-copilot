@@ -1,0 +1,249 @@
+import { describe, expect, it } from "vitest";
+
+import type { Requirement } from "@/types/api";
+
+import type { BackendMapping, BackendProcedureMinimal } from "./schemas";
+import {
+  adaptAssessment,
+  adaptHumanStatus,
+  adaptHumanStatusToBackend,
+  adaptPriorityFromRiskLevel,
+  assembleMappedFinding,
+  assembleUnmappedFinding,
+  buildRegulatoryEvidence,
+} from "./finding-adapt";
+
+function requirement(overrides: Partial<Requirement> = {}): Requirement {
+  return {
+    requirement_id: "REQ-0001",
+    source_document_id: "EXT-EU-AML-001",
+    source_reference: "Section 3",
+    source_text: "Customers must be classified using documented risk factors.",
+    normalized_requirement: "Risk classification",
+    domain: ["AML/CFT"],
+    impacted_activity: [],
+    language: "EN",
+    ...overrides,
+  };
+}
+
+function mapping(overrides: Partial<BackendMapping> = {}): BackendMapping {
+  return {
+    mapping_id: "MAP-0001",
+    requirement_id: "REQ-0001",
+    procedure_id: "PRC-AML-007",
+    assessment: "COVERED",
+    confidence: 0.93,
+    explanation: "Explication de démonstration.",
+    recommended_action: "Aucune action requise.",
+    human_status: "PENDING_REVIEW",
+    ...overrides,
+  };
+}
+
+function procedure(overrides: Partial<BackendProcedureMinimal> = {}): BackendProcedureMinimal {
+  return {
+    procedure_id: "PRC-AML-007",
+    document_id: "INT-PROC-AML",
+    name: "Risk Classification Process",
+    domain: "AML/CFT",
+    owner: null,
+    status: "ACTIVE",
+    current_version: "3.0",
+    ...overrides,
+  };
+}
+
+describe("adaptAssessment", () => {
+  it("traduit les 4 valeurs connues de la base", () => {
+    expect(adaptAssessment("COVERED")).toBe("COVERED");
+    expect(adaptAssessment("PARTIALLY_COVERED")).toBe("PARTIAL");
+    expect(adaptAssessment("POTENTIAL_GAP")).toBe("POTENTIAL_GAP");
+    expect(adaptAssessment("HUMAN_REVIEW")).toBe("EXPERT_REVIEW");
+  });
+
+  it("retombe sur EXPERT_REVIEW plutôt que sur COVERED pour une valeur inconnue", () => {
+    // Ne jamais affirmer une couverture qu'on ne peut pas garantir.
+    expect(adaptAssessment(null)).toBe("EXPERT_REVIEW");
+    expect(adaptAssessment(undefined)).toBe("EXPERT_REVIEW");
+    expect(adaptAssessment("AUTRE_CHOSE")).toBe("EXPERT_REVIEW");
+  });
+});
+
+describe("adaptHumanStatus", () => {
+  it("traduit PENDING_REVIEW en PENDING", () => {
+    expect(adaptHumanStatus("PENDING_REVIEW")).toBe("PENDING");
+  });
+
+  it("laisse passer les décisions déjà prises (participe passé)", () => {
+    expect(adaptHumanStatus("ACCEPTED")).toBe("ACCEPTED");
+    expect(adaptHumanStatus("REJECTED")).toBe("REJECTED");
+    expect(adaptHumanStatus("ESCALATED")).toBe("ESCALATED");
+  });
+
+  it("accepte aussi le verbe court réellement stocké par PUT .../human-status", () => {
+    // `backend/API.md` § 4 documente le verbe court (ACCEPT/REJECT/ESCALATE) comme
+    // valeur acceptée ET stockée (voir l'exemple de réponse, `"human_status": "ACCEPT"`)
+    // — sans ce cas, une exigence tout juste acceptée réapparaîtrait en attente au
+    // prochain chargement.
+    expect(adaptHumanStatus("ACCEPT")).toBe("ACCEPTED");
+    expect(adaptHumanStatus("REJECT")).toBe("REJECTED");
+    expect(adaptHumanStatus("ESCALATE")).toBe("ESCALATED");
+  });
+
+  it("retombe sur PENDING pour une valeur absente ou inconnue", () => {
+    expect(adaptHumanStatus(null)).toBe("PENDING");
+    expect(adaptHumanStatus("AUTRE_CHOSE")).toBe("PENDING");
+  });
+});
+
+describe("adaptHumanStatusToBackend", () => {
+  it("traduit chaque décision du contrat vers le verbe court du backend", () => {
+    expect(adaptHumanStatusToBackend("ACCEPTED")).toBe("ACCEPT");
+    expect(adaptHumanStatusToBackend("REJECTED")).toBe("REJECT");
+    expect(adaptHumanStatusToBackend("ESCALATED")).toBe("ESCALATE");
+    expect(adaptHumanStatusToBackend("PENDING")).toBe("PENDING_REVIEW");
+  });
+
+  it("est l'inverse exact d'adaptHumanStatus pour les quatre valeurs du contrat", () => {
+    for (const status of ["ACCEPTED", "REJECTED", "ESCALATED", "PENDING"] as const) {
+      expect(adaptHumanStatus(adaptHumanStatusToBackend(status))).toBe(status);
+    }
+  });
+});
+
+describe("adaptPriorityFromRiskLevel", () => {
+  it("passe LOW/MEDIUM/HIGH tel quel — mêmes valeurs que Priority", () => {
+    expect(adaptPriorityFromRiskLevel("LOW")).toBe("LOW");
+    expect(adaptPriorityFromRiskLevel("MEDIUM")).toBe("MEDIUM");
+    expect(adaptPriorityFromRiskLevel("HIGH")).toBe("HIGH");
+  });
+
+  it("retombe sur MEDIUM pour une valeur absente ou inconnue", () => {
+    expect(adaptPriorityFromRiskLevel(null)).toBe("MEDIUM");
+    expect(adaptPriorityFromRiskLevel(undefined)).toBe("MEDIUM");
+    expect(adaptPriorityFromRiskLevel("URGENT")).toBe("MEDIUM");
+  });
+});
+
+describe("buildRegulatoryEvidence", () => {
+  it("cite le texte exact de l'exigence, pas une approximation", () => {
+    // Arrange
+    const req = requirement();
+    // Act
+    const evidence = buildRegulatoryEvidence(req, "EU AML/CFT Standard");
+    // Assert
+    expect(evidence).toEqual({
+      document_id: "EXT-EU-AML-001",
+      document_title: "EU AML/CFT Standard",
+      section_reference: "Section 3",
+      excerpt: "Customers must be classified using documented risk factors.",
+      language: "EN",
+    });
+  });
+});
+
+describe("assembleMappedFinding", () => {
+  it("assemble un constat complet à partir d'un couple mappé", () => {
+    // Arrange / Act
+    const finding = assembleMappedFinding({
+      mapping: mapping(),
+      requirement: requirement(),
+      riskLevel: "HIGH",
+      regulationTitle: "EU AML/CFT Standard",
+      procedure: procedure(),
+    });
+    // Assert
+    expect(finding.assessment).toBe("COVERED");
+    expect(finding.priority).toBe("HIGH");
+    expect(finding.human_status).toBe("PENDING");
+    expect(finding.procedure_id).toBe("PRC-AML-007");
+    expect(finding.regulatory_evidence).toHaveLength(1);
+    expect(finding.confidence_or_evidence_strength).toBe(0.93);
+  });
+
+  it("porte le nom de la procédure, sans charger son texte", () => {
+    const finding = assembleMappedFinding({
+      mapping: mapping(),
+      requirement: requirement(),
+      riskLevel: null,
+      regulationTitle: "EU AML/CFT Standard",
+      procedure: procedure(),
+    });
+    expect(finding.procedure_title).toBe("Risk Classification Process");
+    // Un constat garde sa preuve réglementaire : jamais entièrement nu.
+    expect(finding.internal_evidence).toEqual([]);
+    expect(finding.regulatory_evidence).toHaveLength(1);
+  });
+
+  it("relit les variantes françaises quand le backend les fournit (v1.6)", () => {
+    const finding = assembleMappedFinding({
+      mapping: mapping({
+        explanation_lang_fr: "Explication en français.",
+        recommended_action_lang_fr: "Action recommandée en français.",
+      }),
+      requirement: requirement(),
+      riskLevel: "HIGH",
+      regulationTitle: "EU AML/CFT Standard",
+      procedure: procedure(),
+    });
+    expect(finding.explanation_fr).toBe("Explication en français.");
+    expect(finding.recommended_action_fr).toBe("Action recommandée en français.");
+    // Le texte principal reste la langue d'origine, inchangée.
+    expect(finding.explanation).toBe("Explication de démonstration.");
+  });
+
+  it("laisse les variantes françaises indéfinies quand le backend ne les fournit pas", () => {
+    const finding = assembleMappedFinding({
+      mapping: mapping(),
+      requirement: requirement(),
+      riskLevel: "HIGH",
+      regulationTitle: "EU AML/CFT Standard",
+      procedure: procedure(),
+    });
+    expect(finding.explanation_fr).toBeUndefined();
+    expect(finding.recommended_action_fr).toBeUndefined();
+  });
+
+  it("relit l'assigné persisté par une escalade précédente (mapping.assignee)", () => {
+    // Bug réel : sans ce champ, un constat escaladé avec un assigné choisi
+    // redevenait « Non assigné » à l'écran au prochain chargement — la valeur était
+    // bien enregistrée côté backend (`PUT .../assignee`), seulement jamais relue.
+    const finding = assembleMappedFinding({
+      mapping: mapping({ assignee: "USR-002" }),
+      requirement: requirement(),
+      riskLevel: "HIGH",
+      regulationTitle: "EU AML/CFT Standard",
+      procedure: procedure(),
+    });
+    expect(finding.assignee_id).toBe("USR-002");
+  });
+
+  it("laisse assignee_id indéfini quand le mapping n'a personne d'assigné", () => {
+    const finding = assembleMappedFinding({
+      mapping: mapping({ assignee: null }),
+      requirement: requirement(),
+      riskLevel: "HIGH",
+      regulationTitle: "EU AML/CFT Standard",
+      procedure: procedure(),
+    });
+    expect(finding.assignee_id).toBeUndefined();
+  });
+});
+
+describe("assembleUnmappedFinding", () => {
+  it("assemble un constat NO_RELEVANT_PROCEDURE sans preuve interne", () => {
+    // Arrange / Act
+    const finding = assembleUnmappedFinding({
+      requirement: requirement(),
+      riskLevel: "LOW",
+      regulationTitle: "EU AML/CFT Standard",
+    });
+    // Assert
+    expect(finding.assessment).toBe("NO_RELEVANT_PROCEDURE");
+    expect(finding.procedure_id).toBeNull();
+    expect(finding.priority).toBe("LOW");
+    expect(finding.internal_evidence).toEqual([]);
+    expect(finding.regulatory_evidence).toHaveLength(1);
+  });
+});

@@ -1,0 +1,429 @@
+# Contrat d'API — Frontend ↔ Backend
+
+> ## ⚠️ GELÉ — 2026-09-14, remplacé par le duo `backend/API.md` + `docs/api-requests.md`
+>
+> **Ce fichier n'est plus la source de vérité.** Retour de Thư après lecture (2026-09-14) :
+> écrit en français (elle veut de l'anglais), et les structures de réponse (notamment
+> `AnalyzeProcedureResponse`) n'y sont pas assez précises pour coder dessus. Nouvelle convention,
+> décidée d'un commun accord :
+>
+> 1. **`backend/API.md`** (maintenu par Thư, lecture seule pour le frontend) — ce que le backend
+>    expose réellement, avec la vraie forme de requête/réponse. C'est la seule chose à vérifier
+>    avant d'appeler un endpoint.
+> 2. **`docs/api-requests.md`** (en anglais, tenu par le frontend) — tout ce dont le frontend a
+>    besoin et qui manque dans `backend/API.md`. Thư y pioche à son rythme.
+>
+> Ce fichier reste en place pour **l'historique** des versions v1.1 → v1.8 (ce qui a été demandé et
+> pourquoi) — ne plus y ajouter de nouvelle proposition, ni s'y fier pour la forme exacte d'un
+> endpoint réel. Voir aussi `CLAUDE.md` § 0.3 et § 2.
+
+
+*Ancienne description (historique, ne s'applique plus depuis le 2026-09-14 — voir le bandeau
+ci-dessus) : "Source de vérité partagée entre frontend et backend, contrat figé d'un commun
+accord."*
+
+Basé sur le data model de la brief projet (`Abiaka_Regulatory_AI_POC_Full_Project_Guide_EN.docx`,
+section 12) et le "Shared Interface Contract" (section 16.4).
+
+> **v1.1 — proposition du 2026-09-04, en attente de validation par Thư.**
+> Les blocs marqués `// v1.1` ci-dessous sont des modifications demandées par Giang après la revue
+> de la Phase 1. Elles sont déjà implémentées côté frontend et dans la couche de mock ; le backend
+> ne doit s'y aligner qu'une fois la revue commune faite. Résumé des changements :
+> 1. `Finding` devient un couple **(exigence × procédure)** au lieu d'un constat portant plusieurs
+>    procédures — chaque couple a son action et sa propre validation humaine.
+> 2. Ajout de `custom_action` : le relecteur peut retenir une action différente de celle proposée.
+> 3. Ajout des utilisateurs (`User`), de l'authentification, et de l'assignation
+>    (`assignee_id` sur une régulation et sur un constat escaladé).
+> 4. Ajout de `GET /api/dashboard/overview` : agrégats sur **toutes** les régulations.
+> 5. `POST /api/regulations` prend un `assignee_id` ; ajout de `PATCH /api/regulations/:id`.
+>
+> **v1.2 — proposition du 2026-09-04 (même revue).**
+> 6. `by_human_status` sur `RegulationSummary` et `DashboardSummary` : répartition des constats par
+>    décision humaine (`PENDING` / `ACCEPTED` / `REJECTED` / `ESCALATED`). L'UI affiche une
+>    progression de traitement — `status` ne décrit que l'avancement de l'analyse automatique,
+>    pas celui de la revue humaine, ce qui prêtait à confusion.
+> 7. `GET /api/dashboard/map` : arborescence Régulation → Exigence → Procédure alimentant la carte
+>    mentale du tableau de bord.
+>
+> **v1.3 — proposition du 2026-09-07 (revue Giang, onglet Historique).**
+> 8. `POST /api/findings/:id/validate` gagne un champ `actor_id` **requis** : qui prend la
+>    décision. Nécessaire pour l'historique (point suivant) — jusqu'ici, rien ne permettait de
+>    savoir qui avait validé un constat.
+> 9. Ajout de `GET /api/regulations/:id/history` → `AuditHistoryEntry[]` : une entrée par décision
+>    humaine (Accepter / Rejeter / Escalader) prise sur un constat de la régulation. `PENDING`
+>    n'est jamais journalisé — ce n'est pas une décision, c'est l'absence d'une.
+> 10. Les agrégats de portefeuille (`PortfolioSummary.potential_gaps`, `.expert_reviews_required`,
+>     `.by_domain`, `.by_assessment`, et les mêmes champs par régulation dans `RegulationSummary`)
+>     ne portent plus que sur les constats **encore en attente** — un constat déjà tranché ne doit
+>     plus gonfler "ce qu'il reste à faire". `requirements_identified` et `regulations_total`
+>     restent des compteurs de périmètre, non affectés.
+>
+> **v1.4 — proposition du 2026-09-09 (demande Giang, écran de connexion).**
+> 11. `POST /api/auth/signup` : body `{ email, password, full_name? }` → `{ user: User, token:
+>     string }` (même forme que `login`). Le backend de Thư expose déjà cette route
+>     (`backend/API.md` § 6) — le contrat se met à jour pour refléter une capacité réelle, ce
+>     n'est pas une proposition en attente côté backend. **Limite assumée à l'époque, résolue en
+>     v1.5** : voir ci-dessous.
+>
+> **v1.5 — proposition du 2026-09-09 soir (le blocage du point 11 est résolu).**
+> 12. `PUT /api/users/:id/role` : body `{ role: string }` → `User`. Le backend de Thư l'expose
+>     depuis le commit `fabd0cf` (« Create API to update role of user »), quelques minutes après la
+>     v1.4 ci-dessus — répond exactement au point resté ouvert. `role` reste une chaîne libre côté
+>     backend (pas d'énumération imposée, voir `backend/app/schemas/user.py`), le frontend ne lui en
+>     invente pas une. **Limite assumée, à trancher avec Thư** : la route n'a aucun contrôle
+>     d'autorisation propre à l'action — n'importe quel compte authentifié peut changer le rôle de
+>     n'importe quel autre compte, pas seulement le sien ou celui d'un compte qu'il gère.
+>
+> **v1.6 — proposition du 2026-09-09 (nuit).**
+> 13. `Finding.explanation_fr` / `recommended_action_fr` (optionnels) : variantes françaises des
+>     textes générés par le backend, quand il les fournit. Le backend de Thư les expose depuis le
+>     commit `ea02f49` (« Add French for explanation and recommendation »,
+>     `explanation_lang_fr`/`recommended_action_lang_fr` sur `MappingRead`) — c'était le point
+>     ouvert n°5 de `docs/backend-integration.md` (« textes générés non localisables »), résolu côté
+>     backend. `explanation`/`recommended_action` restent la langue d'origine du corpus (l'anglais
+>     en mode backend réel) ; l'écran choisit la variante à afficher selon la langue de l'interface.
+>     Absentes en mode mock, où le corpus de démo est déjà rédigé en français.
+>
+> **v1.7 — proposition du 2026-09-11 (Extended European Regulatory Search, demande Francis).**
+> Non-breaking : tous les nouveaux champs sont optionnels ou ont une valeur par défaut qui
+> reproduit exactement le comportement actuel (`source: "BANK_KB"` partout tant que rien
+> d'européen n'est branché).
+> 14. `RegulatorySource = "BANK_KB" | "EU_LIVE"` — ajouté sur `Requirement.source` et
+>     `Finding.source`. Distingue une exigence/un constat déjà connu du corpus Bank de celui
+>     découvert via la recherche européenne. Badges `[BANK KB]` / `[EU LIVE]` dans l'UI.
+> 15. `Applicability = "CONFIRMED" | "LIKELY_APPLICABLE" | "TO_BE_CONFIRMED" | "NOT_APPLICABLE"` —
+>     nouveau champ optionnel `Finding.applicability`. Dimension indépendante de `assessment` (ne
+>     remplace ni n'étend le mapping des 5 statuts existants — voir `docs/glossary.md`, qui reste
+>     inchangé). `CONFIRMED` réservé aux décisions validées côté Bank ; un constat `EU_LIVE`
+>     démarre par défaut à `TO_BE_CONFIRMED`, jamais `CONFIRMED` d'emblée (l'IA ne doit pas décider
+>     seule qu'une exigence européenne s'applique).
+> 16. `Finding.eu_provenance?` (présent seulement si `source === "EU_LIVE"`) :
+>     `{ repository: string; celex?: string; eli?: string; publication_date?: string;
+>     retrieved_at: string; source_type: string; original_url?: string }` — panneau de provenance
+>     (§7 du retour Francis), condition de crédibilité pour un résultat européen.
+> 17. Nouvel endpoint `POST /api/procedures/:id/analyze` — body `{ scope: "BANK" |
+>     "BANK_PLUS_EU" }` → `{ bank_requirements_identified: number; eu_candidate_requirements?:
+>     number; already_in_bank_kb?: number; additional_eu_candidates?: number; findings: Finding[] }`.
+>     Nécessaire pour la direction inverse (Procédure → Bank KB → extension Europe, UC02/UC03) —
+>     **absente aujourd'hui côté frontend, aucun écran Procédure n'existe encore** (voir
+>     `docs/phases/phase-7-european-search.md` § Jour 0). `scope` absent ou `"BANK"` reproduit
+>     exactement le comportement `analyzeRegulation` actuel, orchestré Bank-first : un échec de la
+>     recherche européenne ne doit jamais faire échouer l'analyse Bank (règle explicite de
+>     Francis — voir le diagramme `/analyze-procedure` dans son email du 2026-09-11).
+> 18. `GET /api/procedures` / `GET /api/procedures/:id` — pour lister/sélectionner une procédure à
+>     analyser (le backend expose déjà les procédures via `/api/documents?category=INTERNAL`,
+>     donc potentiellement juste un alias, à confirmer avec Thư).
+>
+> **v1.8 — proposition du 2026-09-11 (écran « Analyze », fusion phase-6 §2.2 / phase-7 Jour 0).**
+> Comme les propositions précédentes de Giang : déjà implémentée côté frontend + mock MSW, en
+> attente de revue par Thư — ne bloque pas la démo (aucune route backend réelle n'existe pour
+> l'upload/l'analyse de procédure aujourd'hui).
+> 19. `POST /api/procedures` — mêmes règles que `POST /api/regulations` (v1.1) : multipart `file`
+>     (**.docx uniquement**), `file_name`, `assignee_id?`, `uploaded_by_id?` → `DocumentMeta` avec
+>     `document_type: "INTERNAL_PROCEDURE"`, `status: "NOT_ANALYZED"`. Nécessaire pour l'écran
+>     `/procedures` (liste + upload), demandé par Giang le 2026-09-11 — aucune route backend
+>     n'existe encore, à confirmer avec Thư.
+> 20. `AnalyzeProcedureResponse` (item 17 ci-dessus, v1.7) gagne un champ `requirements:
+>     Requirement[]` — les exigences pleines (pas seulement leur ID) couvertes par les
+>     `findings` retournés, pour permettre à l'écran de réutiliser `FindingsActionsTable` tel quel
+>     sans requête supplémentaire par exigence (pattern déjà écarté ailleurs dans ce contrat —
+>     voir phase-6 §2 sur le résumé document). Non-breaking : champ additionnel, pas de
+>     changement sur les champs existants de la v1.7.
+>
+> **v1.9 — confirmée le 2026-09-11 (commit Thư `be74658`, « Add requirement and title in
+> French »).** Contrairement aux propositions précédentes de Giang, ceci reflète une capacité
+> réelle déjà exposée côté backend (comme la v1.4/v1.5) — le contrat se met à jour pour en rendre
+> compte, ce n'est pas une proposition en attente.
+> 21. `RegulatoryRequirement.title_lang_fr` / `.requirement_text_lang_fr` (optionnels) : variantes
+>     françaises de `title`/`requirement_text`, exposées par le backend
+>     (`backend/app/schemas/requirement.py`) sur `GET /api/requirements/*` et dans l'arborescence
+>     `GET /api/mappings/requirements-to-procedures`. Mappées côté frontend sur
+>     `Requirement.normalized_requirement_fr` / `.source_text_fr` — même convention que
+>     `Finding.explanation_fr`/`recommended_action_fr` (v1.6) : `normalized_requirement`/
+>     `source_text` restent la langue d'origine du corpus, l'écran choisit la variante à afficher
+>     selon la langue de l'interface.
+>
+> **Note hors contrat (même pull, commit `462fd58`, « extend signin time »)** : la durée de vie du
+> jeton JWT (`access_token_expire_minutes`) passe de 60 à 1440 minutes (24h) côté backend — résout
+> `docs/known-limitations.md` point 12 (déconnexion après 1h de session). Aucun champ de réponse
+> concerné, rien à changer côté frontend au-delà de la note dans les limitations connues.
+>
+> **v1.10 — confirmée le 2026-09-13 (audit Backend → Frontend, Haiku).** 
+> Cette version reflète des champs réellement exposés par le backend depuis le départ mais non
+> documentés dans le contrat. C'est une correction de documentation, pas une capacité nouvelle.
+> 22. `DocumentMeta.created_at`, `DocumentMeta.updated_at` (optionnels, ISO 8601) : timestamps de
+>     création et modification du document, retournés par `/api/documents` et
+>     `/api/documents/{document_id}` depuis le jour 1 côté backend. Utilisés par le frontend pour
+>     afficher des badges « Updated … » et des timelines de changement.
+> 23. `DocumentMeta.summary` (optionnel, string) : résumé ou description courte du document,
+>     retourné par `/api/documents` et `/api/documents/{document_id}` côté backend. Évite de
+>     charger le `extracted_text` complet si seul un aperçu est nécessaire.
+> 24. `Requirement.created_at`, `Requirement.updated_at` (optionnels, ISO 8601) : timestamps sur
+>     les exigences, retournés par `/api/requirements/*` côté backend. Complètent l'audit trail
+>     pour les exigences dynamiquement découvertes (phase 7+).
+>
+> Champs volontairement **non ajoutés** malgré le retour Francis, car ce sont des concepts
+> produit plus larges qu'un simple champ API — à trancher séparément si besoin :
+> `Hierarchy Level` (L1-L6), `Document Criticality`, `Legal status` (BINDING/GUIDANCE/...),
+> `Operational Priority` calculée sur plusieurs facteurs (`priority` reste tel quel pour l'instant).
+
+## Conventions générales
+
+- Toutes les réponses en JSON, `Content-Type: application/json`.
+- Toutes les dates en ISO 8601 (`YYYY-MM-DD`).
+- Tous les IDs sont des strings (`REQ-017`, `KYC-004`, etc.), pas des nombres.
+- Erreurs : `{ "error": { "code": string, "message": string } }` avec status HTTP approprié.
+- Le backend peut être servi sous n'importe quelle stack (Thư) — le frontend ne dépend que de cette
+  forme JSON, jamais d'une implémentation particulière.
+
+## Types partagés
+
+```typescript
+type Language = "FR" | "EN";
+type Assessment = "COVERED" | "PARTIAL" | "POTENTIAL_GAP" | "NO_RELEVANT_PROCEDURE" | "EXPERT_REVIEW";
+type Priority = "LOW" | "MEDIUM" | "HIGH";
+type HumanStatus = "PENDING" | "ACCEPTED" | "REJECTED" | "ESCALATED";
+type DocumentType = "REGULATION" | "INTERNAL_PROCEDURE";
+
+// v1.1 — utilisateurs et assignation
+interface User {
+  user_id: string;
+  full_name: string;
+  email: string;
+  role: string;            // ex: "Responsable Conformité", "Analyste Conformité"
+}
+
+interface EvidenceRef {
+  document_id: string;
+  document_title: string;
+  section_reference: string;   // ex: "Article 4" ou "KYC-004 §1"
+  excerpt: string;             // texte source exact, langue d'origine
+  language: Language;
+}
+
+interface DocumentMeta {
+  document_id: string;
+  title: string;
+  document_type: DocumentType;
+  authority_or_owner: string;  // ex: "ACPR", "EBA", "IA Bank - Direction Conformité"
+  domain: string[];            // ex: ["KYC", "AML/CFT"]
+  language: Language;
+  version: string;
+  published_at?: string;       // v1.10 — ISO 8601, publication/release date
+  effective_date?: string;
+  status: "NOT_ANALYZED" | "ANALYZING" | "ANALYZED";
+  uploaded_by_id?: string;   // v1.1 — User.user_id, absent pour le corpus préchargé
+  uploaded_at?: string;      // v1.1 — ISO 8601
+  assignee_id?: string;      // v1.1 — User.user_id chargé du traitement, modifiable
+  created_at?: string;       // v1.10 — ISO 8601, timestamp de création du document
+  updated_at?: string;       // v1.10 — ISO 8601, timestamp de dernière modification
+  summary?: string;          // v1.10 — résumé ou description courte du document
+}
+
+interface Requirement {
+  requirement_id: string;          // "REQ-017"
+  source_document_id: string;
+  source_reference: string;        // "Article 4"
+  source_text: string;             // texte exact source
+  normalized_requirement: string;  // reformulation courte
+  domain: string[];
+  impacted_activity: string[];
+  effective_date?: string;
+  language: Language;
+  created_at?: string;             // v1.10 — ISO 8601, timestamp de création
+  updated_at?: string;             // v1.10 — ISO 8601, timestamp de dernière modification
+}
+
+// v1.1 — un Finding = UN couple (exigence × procédure interne).
+// Une exigence touchant deux procédures produit donc DEUX findings, chacun avec sa
+// propre action et sa propre validation humaine. Une exigence sans procédure
+// correspondante produit un finding avec `procedure_id: null`.
+interface Finding {
+  finding_id: string;
+  requirement_id: string;
+  procedure_id: string | null;           // v1.1 — remplace `matched_procedure_ids`
+  assessment: Assessment;
+  regulatory_evidence: EvidenceRef[];
+  internal_evidence: EvidenceRef[];
+  explanation: string;                   // doit respecter docs/ui-guardrails.md
+  explanation_fr?: string;               // v1.6 — variante française, si le backend
+                                         // en fournit une (`explanation` reste la
+                                         // langue d'origine du corpus)
+  missing_or_ambiguous_elements: string[];
+  recommended_action: string;            // action proposée par le système
+  recommended_action_fr?: string;        // v1.6 — idem, variante française
+  custom_action?: string;                // v1.1 — action retenue par le relecteur.
+                                         // Si absente/vide, c'est `recommended_action`
+                                         // qui fait foi.
+  priority: Priority;
+  confidence_or_evidence_strength?: number; // 0-1, optionnel — voir guardrails
+  human_status: HumanStatus;
+  assignee_id?: string;                  // v1.1 — renseigné à l'escalade
+  reviewer_comment?: string;
+  updated_at: string;
+}
+
+// v1.3 — une décision humaine journalisée (onglet « Historique »). PENDING n'apparaît
+// jamais ici : ce n'est pas une décision, c'est l'absence d'une.
+interface AuditHistoryEntry {
+  entry_id: string;
+  regulation_id: string;
+  requirement_id: string;
+  finding_id: string;
+  procedure_id: string | null;
+  action: "ACCEPTED" | "REJECTED" | "ESCALATED";
+  actor_id: string;                      // User.user_id — qui a pris la décision
+  custom_action?: string;
+  reviewer_comment?: string;
+  created_at: string;                    // ISO 8601
+}
+
+// Agrégats d'UNE régulation (écran de détail d'une régulation).
+interface DashboardSummary {
+  requirements_identified: number;
+  procedures_impacted: number;
+  potential_gaps: number;
+  expert_reviews_required: number;
+  actions_pending: number;
+  actions_total: number;                 // v1.1 — pour afficher "3 / 11 traités"
+  by_human_status: { human_status: HumanStatus; count: number }[]; // v1.2
+  by_domain: { domain: string; count: number }[];
+  by_assessment: { assessment: Assessment; count: number }[];
+  top_priority_findings: Finding[];
+}
+
+// v1.1 — agrégats sur TOUTES les régulations (écran Dashboard d'accueil).
+// `by_regulation` alimente aussi les cartes de la liste des régulations, pour
+// éviter un appel `summary` par carte.
+interface RegulationSummary {
+  regulation_id: string;
+  title: string;
+  status: DocumentMeta["status"];
+  assignee_id?: string;
+  requirements_identified: number;
+  potential_gaps: number;
+  expert_reviews_required: number;
+  actions_pending: number;
+  actions_total: number;
+  // v1.2 — répartition des constats par décision humaine, pour afficher une
+  // progression de traitement plutôt qu'un simple statut d'analyse.
+  by_human_status: { human_status: HumanStatus; count: number }[];
+  // Personnes à qui un constat a été confié lors d'une escalade, lorsqu'elles
+  // diffèrent de `assignee_id`. Affiché sur la carte de la régulation.
+  escalated_assignee_ids: string[];
+  // v1.10 — résumé ou description courte du document
+  summary?: string;
+}
+
+// v1.2 — arborescence Régulation → Exigence → Procédure, pour la carte mentale
+// du tableau de bord. Chaque nœud porte de quoi construire un lien de navigation.
+interface RegulationMapProcedure {
+  finding_id: string;
+  procedure_id: string | null;
+  assessment: Assessment;
+  human_status: HumanStatus;
+}
+
+interface RegulationMapRequirement {
+  requirement_id: string;
+  source_reference: string;
+  normalized_requirement: string;
+  procedures: RegulationMapProcedure[];
+}
+
+interface RegulationMapNode {
+  regulation_id: string;
+  title: string;
+  status: DocumentMeta["status"];
+  requirements: RegulationMapRequirement[];
+}
+
+interface PortfolioSummary {
+  regulations_total: number;
+  regulations_analyzed: number;
+  requirements_identified: number;
+  potential_gaps: number;
+  expert_reviews_required: number;
+  actions_pending: number;
+  by_regulation: RegulationSummary[];
+  by_domain: { domain: string; count: number }[];
+  by_assessment: { assessment: Assessment; count: number }[];
+}
+```
+
+## Endpoints
+
+### Régulations
+
+| Méthode | Route | Description | Réponse |
+|---|---|---|---|
+| GET | `/api/regulations` | Liste des régulations (préchargées pour démo + uploadées) | `DocumentMeta[]` |
+| POST | `/api/regulations` | v1.1 — Upload (multipart : `file` **.docx uniquement**, `file_name`, `assignee_id`, `uploaded_by_id`) | `DocumentMeta` |
+| PATCH | `/api/regulations/:id` | v1.1 — Modifier l'assignation — body `{ assignee_id }` | `DocumentMeta` |
+| GET | `/api/regulations/:id` | Détail + texte extrait | `DocumentMeta & { extracted_text: string }` |
+| POST | `/api/regulations/:id/analyze` | Déclenche l'extraction des exigences (async) | `{ status: "ANALYZING" }` |
+| GET | `/api/regulations/:id/requirements` | Liste des exigences extraites | `Requirement[]` |
+
+`file_name` est envoyé explicitement en plus de `file` : selon le runtime, le nom du fichier
+n'est pas toujours conservé dans la partie multipart. Le backend valide l'extension sur
+`file_name`, et retombe sur le nom porté par `file` si le champ est absent.
+
+### Findings (constats d'impact)
+
+| Méthode | Route | Description | Réponse |
+|---|---|---|---|
+| GET | `/api/requirements/:id/findings` | Constats pour une exigence donnée | `Finding[]` |
+| GET | `/api/findings?regulation_id=...` | Tous les constats d'une régulation (pour la table Impact Analysis) | `Finding[]` |
+| POST | `/api/findings/:id/validate` | v1.3 — Valider un constat — body `{ human_status, custom_action?, reviewer_comment?, assignee_id?, actor_id }` (`actor_id` requis depuis v1.3) | `Finding` (mis à jour) |
+
+### Historique (v1.3)
+
+| Méthode | Route | Description | Réponse |
+|---|---|---|---|
+| GET | `/api/regulations/:id/history` | v1.3 — Décisions humaines prises sur les constats de la régulation, la plus récente en premier | `AuditHistoryEntry[]` |
+
+### Dashboard
+
+| Méthode | Route | Description | Réponse |
+|---|---|---|---|
+| GET | `/api/dashboard/overview` | v1.1 — Agrégats sur toutes les régulations (écran d'accueil + cartes) | `PortfolioSummary` |
+| GET | `/api/dashboard/map` | v1.2 — Arborescence Régulation → Exigence → Procédure (carte mentale) | `RegulationMapNode[]` |
+| GET | `/api/dashboard/summary?regulation_id=...` | Agrégats KPI d'une régulation (écran de détail) | `DashboardSummary` |
+
+### Procédures internes
+
+| Méthode | Route | Description | Réponse |
+|---|---|---|---|
+| GET | `/api/procedures` | Liste des procédures internes indexées | `DocumentMeta[]` |
+| POST | `/api/procedures` | v1.8 — Upload (multipart : `file` **.docx uniquement**, `file_name`, `assignee_id?`, `uploaded_by_id?`) | `DocumentMeta` |
+| GET | `/api/procedures/:id` | Détail d'une procédure | `DocumentMeta & { extracted_text: string }` |
+| POST | `/api/procedures/:id/analyze` | v1.7/v1.8 — Analyse Bank (+ Europe optionnel) — body `{ scope?: "BANK" \| "BANK_PLUS_EU" }` | `AnalyzeProcedureResponse` |
+
+### Authentification et utilisateurs (v1.1)
+
+Authentification simple pour la démo — pas de SSO, pas de gestion de rôles fine. Le rôle porté par
+`User.role` est **informatif** (affiché dans l'UI) et ne restreint aucune action en v1.1.
+
+| Méthode | Route | Description | Réponse |
+|---|---|---|---|
+| POST | `/api/auth/login` | body `{ email, password }` | `{ user: User, token: string }` |
+| POST | `/api/auth/signup` | v1.4 — body `{ email, password, full_name? }`, crée un compte | `{ user: User, token: string }` |
+| POST | `/api/auth/logout` | Termine la session | `{ ok: true }` |
+| GET | `/api/auth/me` | Utilisateur de la session courante | `User` |
+| GET | `/api/users` | Liste des utilisateurs assignables | `User[]` |
+| PUT | `/api/users/:id/role` | v1.5 — body `{ role: string }`, change le rôle d'un compte | `User` |
+
+### Copilot (P2 — optionnel, ne pas bloquer le P0 dessus)
+
+| Méthode | Route | Description | Réponse |
+|---|---|---|---|
+| POST | `/api/copilot/ask` | body `{ question: string, language: Language }` | `{ answer: string, evidence: EvidenceRef[] }` |
+
+## Statut de mise en œuvre
+
+- [ ] v1 gelée d'un commun accord avec Thư (à faire en Phase 1)
+- [ ] Endpoints réels disponibles côté backend
+- [ ] Frontend a basculé des mocks vers les appels réels
+
+Tant que le backend n'est pas prêt, le frontend implémente ces endpoints en mock (MSW ou route
+handlers Next.js) avec des données de démo cohérentes — voir `frontend/CLAUDE.md`.

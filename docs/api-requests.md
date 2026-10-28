@@ -1,0 +1,256 @@
+# API Requests — Frontend → Backend (gaps list)
+
+**English, per Thư's request (2026-09-14).** This file lists what the frontend needs from the
+backend that `backend/API.md` does not yet cover, or where a decision is still pending. It is the
+mirror of `backend/API.md`: that file says what exists (read-only, maintained by Thư); this file
+says what's missing or requested, so Thư can pick items off it at her own pace and check them off
+here once shipped.
+
+**Rule (agreed 2026-09-14):** the frontend calls the backend based on `backend/API.md` only —
+never invents a response shape. Anything the frontend needs that isn't in `backend/API.md` gets
+listed here instead of being guessed. `docs/api-contract.md` is frozen as a historical log (see the
+banner at its top) and is no longer the thing to check before calling an endpoint.
+
+## Open / deferred
+
+16. **Hosted backend: every request that touches the database takes 0.75 s or more** (measured
+    2026-10-07, frontend `ia-bank-demo-one.vercel.app`, backend
+    `ia-bank-demo-production.up.railway.app`, from a browser in Vietnam).
+    - No database (`GET /`): ~0.22 s. `GET /health`: 0.73–0.85 s. `GET /api/auth/me`: 0.75–0.83 s.
+      `GET /api/documents`: 1.1–1.2 s. `GET /api/requirements/by-documents`: 1.3–2.2 s.
+      `GET /api/mappings/requirements-to-procedures`: 1.3–1.9 s.
+    - Only 5 database-backed requests are served fast at once: 12 parallel `GET /health`, twice,
+      gave 5 answers at ~0.8 s and 7 at ~1.7 s. Matches SQLAlchemy's default `pool_size=5`
+      (`app/db/session.py`): each extra request opens a new connection (~0.9 s more).
+    - Result for the user: the dashboard (7 regulations, 16 requests in 3 waves) shows its content
+      after 5.5–6.5 s; a regulation page after 4.7–5.0 s (7 requests in 2 waves).
+    - **Suggested, in order of expected gain (none tried):** (a) check that the Neon database and
+      the Railway service are in the same region — ~0.5 s for a trivial query suggests they are
+      not; (b) raise `pool_size` above the number of parallel requests a page sends (dashboard:
+      one per regulation); (c) `pool_pre_ping=True` adds one database round trip to every request —
+      `pool_recycle` would avoid it; (d) one aggregated endpoint for the dashboard (regulations
+      with their requirements and mappings) instead of `1 + N + N` requests.
+    - **Shipped and deployed on 2026-10-07 (PR #8, merged by Hoang, not reviewed by Thư):** (b)
+      `pool_size=20` and (d) `GET /api/dashboard/portfolio` (documents, requirements, nested
+      mappings and escalation assignees in one response; `backend/API.md` § 5.5). Measured on the
+      hosted instance after deployment:
+      - 12 parallel `GET /health`: all 12 answer in 0.83–0.96 s (before: 5 fast, 7 at ~1.7 s).
+      - `GET /api/dashboard/portfolio`, real data (7 regulations, 213 requirements, 17 mappings):
+        1.8–4.0 s, median ~2.5 s, 502 KB of JSON before compression.
+      - Dashboard content after 2.1–4.5 s, median ~3.1 s over 7 loads (before: 5.5–6.5 s).
+    - **Still open for Thư:** review PR #8 after the fact (`pool_size=20` against Neon's
+      connection limit); (a) region of Neon and Railway; (c) `pool_pre_ping`; the portfolio
+      response is large because it carries every requirement's full text, which the dashboard
+      does not display; a regulation page still takes 4.3–5.1 s (6 requests in 2 waves).
+    - Frontend side (done, 2026-10-07): the dashboard calls `GET /api/dashboard/portfolio`
+      (`lib/api/backend/resources.ts::fetchPortfolio`). If that request fails for any reason
+      other than an expired session, it falls back to loading regulations in at most 4 parallel
+      groups (measured 5.1–5.3 s). One request per regulation gave 5.5–6.5 s, and one batched
+      request for all of them 6.3–8.3 s: above 200 requirements the pages follow one another.
+
+15. **Impact analysis drops the assessment when no modification can be grounded** (2026-10-02).
+    **Proposed fix on branch `fix/be-review` (PR awaiting Thư's review):** the mapping is stored
+    without modifications, and an already analysed pair is skipped.
+    `requirement_procedure_mapping.py:349` skips the mapping (`continue`) when `grounded_mods` is
+    empty: a `COVERED` result (`suggested_modifications: []`) is never stored, and neither is a gap
+    whose `original_text` is not found verbatim. Seen on the hosted instance, requirement
+    `01M3R64NHQW4D2615C63BRFN51`: `mappings_created: 0` with warnings "Original text not found in
+    any chunk…" and "Skipping mapping … no valid modifications" for both procedures. The
+    requirement then shows as never analysed (no finding, "Analyze impact" still offered, a new LLM
+    call each time); 127 requirements, 15 mappings, none `COVERED`. Suggested: store the mapping
+    with its assessment and explanation and an empty `suggested_modifications`. Frontend side
+    (done): a `0 mapping` result now shows a warning with the returned `warnings` instead of a
+    success toast, and the finding page shows explanation / recommended action without
+    modifications.
+    Related: `MappingRead` has no `assignee` — the frontend now reads the escalation assignee from
+    `GET /api/mappings/history` (latest `ESCALATE` row). Returning it on the mapping would save
+    that request.
+
+14. **List the extraction jobs of a document** (2026-10-02).
+    **Partly covered on branch `fix/be-review`:** `POST /api/requirements/extract` becomes
+    idempotent and returns the jobs still to process, so calling it again resumes an interrupted
+    extraction. The frontend does not use this yet (its button only shows when there is no
+    requirement at all).
+    `POST /api/requirements/jobs/{job_id}/process` can retry a `FAILED` job, but no endpoint
+    returns a document's jobs: the frontend only knows the ids from the `POST /api/requirements/extract`
+    response. It now keeps the failed ids in memory and offers "Retry failed sections", but after
+    a page reload (or a closed tab mid-run) the `PENDING`/`FAILED` jobs can no longer be found, so
+    those chunks are never extracted. Suggested: `GET /api/requirements/jobs?document_id=…`
+    returning `ExtractionJobRead[]` (optionally `&status=PENDING&status=FAILED`).
+
+13. **Copilot "remaining requirements" ignores `ESCALATE`** (2026-09-30).
+    `backend/app/routers/copilot.py:71-75` counts a requirement as remaining when it has no mapping
+    or a `PENDING_REVIEW` mapping. A requirement whose only open mapping is `ESCALATE` (waiting for
+    an expert) is therefore counted as done. Suggested: treat `ESCALATE` like `PENDING_REVIEW`
+    there (`human_status in ("PENDING_REVIEW", "ESCALATE")`). Today's figure is unaffected (the only
+    escalated requirement also has a pending mapping).
+
+12. **`suggested_modifications[].new_text` must be in the procedure's language** (2026-09-30).
+    Seen on mapping `01M3R659NMBP4R168JRXANFX10`: the procedure is French, `original_text` is French,
+    but `new_text` ("ARTICLE 12 — Virtual Currency Risk Management…") is English. On ACCEPT that
+    English text gets written into the French procedure. Cause, read-only look at
+    `backend/app/services/requirement_procedure_mapping.py`: the prompt says "all text fields in
+    English and French" (l. 295) and never says which language `new_text` uses (l. 306/313).
+    Suggested fix: add to the rules "Write `new_text` in the same language as the procedure text
+    (the language of `original_text`)". No API shape change; existing mappings need a re-run.
+    Also noted: `GET /api/mappings/{id}` has no `title_lang_fr`/`requirement_text` in its
+    `requirement` block — the frontend now calls `GET /api/requirements/{id}` as well; adding
+    them there would save that request (nice-to-have).
+
+1. **European search (CELLAR / EUR-Lex)** — split in two (2026-09-15):
+   - **Metadata search — done frontend-side, no backend needed.** A thin Next.js route
+     `GET /api/eu-search` (`frontend/src/app/api/eu-search/route.ts`) queries the public CELLAR
+     SPARQL endpoint (`https://publications.europa.eu/webapi/rdf/sparql`, no registration, no CORS
+     header → must be server-side) and returns `{ results: [{ celex, title, date, type, inForce,
+     eurlexUrl }], page, hasMore }`. Used only by the Knowledge Base search panel. Full design,
+     measured latencies and the (absent) official rate limits:
+     `docs/superpowers/specs/2026-09-15-eu-search-design.md`. Thư: this answers "what does the API
+     return" — feel free to reuse the SPARQL queries there.
+   - **EU analysis (candidate EU requirements, dedup vs Bank KB, applicability) — still deferred to
+     Thư.** Nothing in the frontend assumes a backend shape for it; `AwaitingBackendBadge` stays on
+     the EU counters of the procedure analysis screen.
+
+2. **Procedure analysis — trigger/compute endpoint.** ⚠️ **Confirmed gap, not yet raised with Thư.**
+   `docs/api-contract.md` (v1.7/v1.8) proposes `POST /api/procedures/:id/analyze`, and the frontend
+   already has a mock (`analyzeProcedure()`, MSW handler) built against it. A case-insensitive
+   search of the full `backend/API.md` (1272 lines) for "analyz" returns **zero matches** — there is
+   no real endpoint anywhere for triggering or computing a procedure/requirement mapping on demand.
+   The only real way to read mapping results today is `GET /api/mappings/all?procedure_id=...`
+   (and `GET /api/mappings/requirements-to-procedures`), which only returns mappings that already
+   exist in the database.
+   **Open question for Thư:** is analysis always a precomputed/offline/batch process (i.e. a newly
+   uploaded procedure has no real way to be analyzed at all yet), or is there a trigger endpoint
+   planned under a different name? This blocks the "Analyze" screen (Phase 6/7 — `POST
+   /api/procedures` + `POST /api/procedures/:id/analyze`) from ever leaving mock mode until it's
+   answered.
+
+3. **Classification field — criteria.** Thư will add a classification field to documents/procedures
+   ("để tạo thêm nhưng mà phân loại dựa trên tiêu chuẩn gì?" — but based on what criteria?). No
+   taxonomy has been specified anywhere yet beyond Francis's loose examples ("concerning customer",
+   "concerning head office"). **Needs an answer from Giang/Francis before Thư builds it** — listed
+   here as blocked-on-us, not blocked-on-Thư.
+
+12. **Hosted backend on Neon, reachable by the Vercel frontend** (requested 2026-09-23). The Vercel
+    frontend has no backend to talk to: Neon is only the database, and the backend currently runs
+    on local machines only. Needed:
+    - `backend/` deployed to a public HTTPS host (plan in `PROGRESS.md`: Render or Railway) with
+      `DATABASE_URL` pointing to the Neon database, a strong `SECRET_KEY` (not the
+      `dev-secret-key-change-me` default) and `DEBUG=false`.
+    - `CORS_ORIGINS` including the Vercel production domain (Giang to send the exact
+      `https://….vercel.app` URL; preview deployments use other domains, so list those too if
+      needed).
+    - `requests` and `tiktoken` added to `backend/pyproject.toml`: `app/services/llm_client.py`
+      imports them, and a fresh install without them does not start.
+    - Send the public URL back (or add it to `backend/README.md`). The frontend then only sets
+      `NEXT_PUBLIC_BACKEND_URL=<that URL>` in the Vercel project settings and redeploys; no code
+      change is needed on the frontend side.
+
+## Shipped by Thư (2026-09-13/14) — verified in `backend/API.md` and the models
+
+4. **Three distinct dates** — ✅ shipped. `Document` now has `created_at`, `updated_at`
+   (`onupdate`), `published_at`; `Procedure` now has `created_at`/`updated_at`;
+   `RegulatoryRequirement` too. Frontend (`documentMetaSchema`, `adapt.ts`) already maps all three
+   (contract v1.10, commit `1a88b12`).
+5. **Real publication date** — ✅ shipped as `Document.published_at`. Mapped frontend-side.
+6. **Summary / excerpt field** — ✅ shipped as `Document.summary` (`Text`, nullable). Wired into
+   the Dashboard row and `/regulations` cards frontend-side (commits `a540be4`, `4b3e7ea`,
+   `0ccb9af`, `1a88b12`).
+
+   **✅ Follow-up bug fixed (2026-09-14), was pure frontend staleness, not a backend gap** —
+   `regulation-detail-view.tsx` now reads `created_at` for "Created date" and
+   `updated_at ?? AwaitingBackendBadge` for "Last updated" (was hardcoding the badge and
+   mislabeling `published_at`). See `docs/phases/phase-6-francis-feedback.md` §4.
+
+## Shipped by Thư (2026-09-15) — verified in `backend/API.md` and wired in
+
+10. **Document assignee — ✅ shipped and wired frontend-side.** `Document.assignee` (`4ea5611`) +
+    `PUT /api/documents/{id}/assignee` (user_id or email). Replaces the local-only
+    `regulation-assignee-overrides.ts` workaround (removed same day) — a regulation's "Assigned
+    to" now really persists server-side (`lib/api/backend/resources.ts::updateDocumentAssignee`,
+    `lib/api/regulations.ts::updateRegulationAssignee`). See `docs/known-limitations.md` #6.
+
+11. **⚠️ Regression, not a request — `requirement_procedure_map.assignee` removed (`3f3f05b`),
+    `PUT /api/mappings/:id/assignee` no longer exists.** Frontend was calling it (escalating a
+    finding to a specific person) — would have 404'd on every escalation-with-assignee in
+    backend-live mode. Adapted: the frontend stopped calling the deleted route
+    (`resources.ts::validateMapping`); the chosen assignee still shows immediately (optimistic)
+    but is no longer persisted server-side — see `docs/known-limitations.md` #1. **Open question
+    for Thư, not urgent**: was per-finding assignee intentionally dropped in favor of
+    document-level-only assignment, or is a replacement planned? If intentional, this frontend
+    behavior (UI-only, non-persistent) is the permanent state, not a stopgap.
+
+12. **New dedicated `GET /api/procedures` / `GET /api/procedures/{id}` and `GET /api/requirements`
+    (list-all) exist now — not wired in yet, needs a decision before doing so.** Unlike item 8
+    below (which pointed the frontend at `/api/documents?document_type=PROCEDURE` for lack of
+    anything better), `/api/procedures` returns a genuinely different entity: `procedure_id` (e.g.
+    `PRC-AML-007`) distinct from `document_id` (e.g. `INT-PROC-AML`), with its own `name`/`owner`,
+    nesting the linked `document`. The frontend's `/procedures` screen is currently built around
+    one-document-is-one-procedure (routes, `fetchProcedure(id)` etc. all keyed by `document_id`).
+    Switching to the real `Procedure` entity as the list/detail source would be a genuine
+    identity-model change (a document could have several procedures), not a drop-in swap — **not
+    done in this pass, flagged for a decision with Giang** before wiring it in. `GET
+    /api/requirements` (list-all, unfiltered by document) has no current frontend use case either
+    — noted here in case one comes up, not acted on.
+
+## Resolved — already available, no backend change needed
+
+7. **"Why is this mandatory" / explanation text for a mapping.** Already in the real response of
+   `GET /api/mappings/all`: `explanation`, `explanation_lang_fr`, `recommended_action`,
+   `recommended_action_lang_fr`. Frontend should call this endpoint directly instead of asking for
+   a new field.
+
+## Confirmed real — frontend to switch onto these instead of the invented `/api/procedures/*` routes
+
+8. Procedure list/detail/content should use the **real, already-implemented** endpoints (verified
+   against `backend/API.md` and `backend/app/routers/documents.py`):
+   - `GET /api/documents?document_type=PROCEDURE` (list — filter confirmed real, line 31/63-64 of
+     `documents.py`)
+   - `GET /api/documents/{document_id}` (detail)
+   - `GET /api/documents/content/{version_id}` (content, chunked)
+   These replace the frontend-invented `GET /api/procedures`, `GET /api/procedures/:id` in
+   `docs/api-contract.md` v1.6/v1.8. **Superseded by item 12 above (2026-09-15)** — a real,
+   purpose-built `/api/procedures` now exists; whether to migrate onto it is an open decision, not
+   settled by this item anymore. Note (2026-09-21): uploads now have real routes — see item 11.
+
+## Shipped by Thư (2026-09-21) — upload / ingestion, wired in
+
+11. **Document ingestion — ✅ shipped and wired frontend-side (2026-09-21).**
+    `POST /api/documents/regulation-ingest` and `POST /api/procedures/ingest` (same body/response,
+    `backend/API.md` § 3). One dialog now serves both (`components/features/upload-document-dialog.tsx`,
+    replaces the two near-duplicate dialogs), calling `lib/api/upload.ts::uploadDocument`:
+    `text` = the client-side extracted chunks flattened by `chunksToText` (item 9), user-entered
+    `title` (prefilled from the file name), `domain` (select of the 9 values listed in API.md),
+    `language` (FR/EN), optional `summary` and `published_at` (date input → `YYYY-MM-DDT00:00:00`),
+    `created_by` = the signed-in user's `user_id`. MSW mode keeps the multipart mock, which now
+    reads the same metadata.
+    **Questions for Thư (non-blocking, defaults taken):**
+    - The services set `assignee = created_by`. The dialog still lets the user pick another
+      assignee → the frontend calls `PUT /api/documents/{id}/assignee` right after ingest when it
+      differs. OK, or should `assignee` be an optional field of the ingest body instead?
+    - Ingest does not extract requirements. The frontend does **not** chain
+      `POST /api/requirements/extract` automatically — the existing button on the regulation detail
+      page is used. Should upload trigger it?
+    - `backend/API.md` § 3 says "Extracts metadata heuristically" in the intro but "Metadata must be
+      provided by the client — no automatic extraction" in the notes. The frontend follows the notes
+      (and the Pydantic schema: `title`/`domain`/`language`/`created_by` required).
+
+## Client-side content extraction (now sent to the ingestion routes, see item 11)
+
+9. **Frontend now extracts file content client-side before upload** (Thư's request, 2026-09-14) —
+   `frontend/src/lib/file-extract.ts`. On the two upload dialogs (regulation, procedure), selecting
+   a `.docx` or `.xlsx` file extracts its content **locally, no network call** (via `mammoth` for
+   Word, `xlsx`/SheetJS for Excel), shows a live preview, and blocks the Upload button until
+   extraction succeeds. Upload now also accepts `.xlsx`, not just `.docx`.
+
+   **Shape produced, matching what `backend/API.md` already expects on the one real endpoint that
+   takes document content** (`POST /api/documents/{id}/update`): an array of
+   `{ chunk_no, section_title, content }`. Whenever the real **create** endpoint (item 2 above)
+   exists, the frontend should be able to send these chunks directly — no format renegotiation
+   needed, just wiring the call.
+
+   **Update 2026-09-21:** in backend mode the chunks are flattened to `text` and sent to the
+   ingestion routes (item 11). The multipart `extracted_chunks` field is now MSW-only.
+
+---
+*Maintained by the frontend session. Thư: cross off / move to "Resolved" whatever you ship, or
+just tell Giang and it'll get moved here.*
